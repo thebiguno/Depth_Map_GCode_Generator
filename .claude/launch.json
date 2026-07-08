@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "web-static",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "8284", "--directory", "/Users/wyatt/Documents/Programming/Vibe/WatermanButterflyGenerator/web"],
+      "port": 8284
+    }
+  ]
+}

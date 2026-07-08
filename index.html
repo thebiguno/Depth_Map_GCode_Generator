@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Depth Map GCode Generator</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="app-header">
+  <h1>Depth Map GCode Generator</h1>
+  <p class="subtitle">Depth-map PNG &rarr; GRBL-friendly raster toolpaths. Runs entirely in your browser &mdash; no upload, no server.  Works best with current Chrome versions.</p>
+  <p class="subtitle">This is a work in progress; USE AT YOUR OWN RISK!</p>
+</header>
+
+<main class="app-layout">
+
+  <!-- ===================== LEFT COLUMN: CONTROLS ===================== -->
+  <section class="controls" aria-label="Controls">
+
+    <!-- ---- Phase 1: File input + decode badge ---- -->
+    <fieldset class="panel" id="panel-file">
+      <legend>Image</legend>
+      <label class="field">
+        <span>PNG depth map (16 bit grayscale + alpha channel preferred)</span>
+        <input type="file" id="file-input" accept="image/png">
+      </label>
+      <div id="decode-badge" class="badge badge-empty">No image loaded</div>
+      <div id="decode-error" class="error-message" hidden></div>
+    </fieldset>
+
+    <!-- ---- Settings: export/import file + auto-save ---- -->
+    <fieldset class="panel" id="panel-settings">
+      <legend>Settings</legend>
+      <p class="hint">Scale, depth, tools &amp; passes (everything except the image) auto-save in this browser and restore on reload.</p>
+      <div class="button-row">
+        <button type="button" id="settings-export-btn">Export to file</button>
+        <button type="button" id="settings-import-btn">Import from file</button>
+        <button type="button" id="settings-reset-btn">Reset to defaults</button>
+      </div>
+      <input type="file" id="settings-import-input" accept=".json,application/json" hidden>
+      <div class="readout" id="settings-status">Auto-save: on</div>
+    </fieldset>
+
+    <!--
+      ========================================================================
+      STUB PANELS BELOW: layout placeholders only. Behavior for these panels
+      is implemented in later phases. Do not wire up logic here in Phase 1.
+      ========================================================================
+    -->
+
+    <!-- ---- Phase 3: Scale ---- -->
+    <fieldset class="panel" id="panel-scale">
+      <legend>Scale</legend>
+      <div class="field">
+        <span>Scale mode</span>
+        <label class="radio-line">
+          <input type="radio" name="scale-mode" id="scale-mode-ppm" value="ppm" checked>
+          Pixels / mm
+        </label>
+        <label class="radio-line">
+          <input type="radio" name="scale-mode" id="scale-mode-width" value="widthMm">
+          Physical width (mm)
+        </label>
+        <label class="radio-line">
+          <input type="radio" name="scale-mode" id="scale-mode-height" value="heightMm">
+          Physical height (mm)
+        </label>
+      </div>
+      <label class="field">
+        <span id="scale-value-label">Pixels per mm</span>
+        <input type="number" id="scale-value" step="any" value="4">
+      </label>
+      <div class="readout" id="scale-readout">pixelSizeMm: &mdash;</div>
+    </fieldset>
+
+    <!-- ---- Phase 3: Depth / Zero / Origin ---- -->
+    <fieldset class="panel" id="panel-depth">
+      <legend>Depth &amp; Zero/Origin</legend>
+
+      <label class="field">
+        <span>Zero mode</span>
+        <select id="zero-mode">
+          <option value="bed" selected>Bed (Z=0 at bed, up positive)</option>
+          <option value="stockTop">Stock top (Z=0 at top, cuts negative)</option>
+        </select>
+      </label>
+
+      <label class="field">
+        <span id="black-input-label">Black height (mm)</span>
+        <input type="number" id="black-input" step="any" value="3">
+      </label>
+
+      <label class="field">
+        <span id="white-input-label">White height (mm)</span>
+        <input type="number" id="white-input" step="any" value="38">
+      </label>
+
+      <label class="field" id="stock-top-field">
+        <span>Stock top (mm)</span>
+        <input type="number" id="stock-top-input" step="any" placeholder="auto = max(black, white)">
+      </label>
+
+      <label class="field">
+        <span>Safe Z (mm)</span>
+        <input type="number" id="safe-z-input" step="any" placeholder="auto">
+      </label>
+
+      <label class="field">
+        <span>Origin</span>
+        <select id="origin-mode">
+          <option value="center" selected>Center</option>
+          <option value="lowerLeft">Lower-left</option>
+        </select>
+      </label>
+
+      <div class="readout" id="depth-readout">Surface Z range: &mdash;</div>
+    </fieldset>
+
+    <!-- ---- Phase 4: Tool table ---- -->
+    <fieldset class="panel" id="panel-tools">
+      <legend>Tools</legend>
+      <div class="table-scroll">
+        <table class="data-table" id="tool-table">
+          <thead>
+            <tr>
+              <th>Tool #</th>
+              <th>Name</th>
+              <th>Shape</th>
+              <th>Diam (mm)</th>
+              <th>Radius (mm)</th>
+              <th>Stepover (mm)</th>
+              <th>Max stepdown (mm)</th>
+              <th>Feed (mm/min)</th>
+              <th>Plunge (mm/min)</th>
+              <th>Spindle (rpm)</th>
+              <th></th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="tool-table-body"></tbody>
+        </table>
+      </div>
+      <button type="button" id="add-tool-btn">Add tool</button>
+    </fieldset>
+
+    <!-- ---- Phase 4: Pass table ---- -->
+    <fieldset class="panel" id="panel-passes">
+      <legend>Passes</legend>
+      <div class="table-scroll">
+        <table class="data-table" id="pass-table">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Tool</th>
+              <th>Direction</th>
+              <th>Stepover (mm)</th>
+              <th>Max stepdown (mm)</th>
+              <th>Allowance (mm)</th>
+              <th id="th-outline-width">Outline Width (mm)</th>
+              <th id="th-outline-depth">Outline Depth Z (mm)</th>
+              <th>Enabled</th>
+              <th></th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="pass-table-body"></tbody>
+        </table>
+      </div>
+      <button type="button" id="add-pass-btn">Add pass</button>
+    </fieldset>
+
+    <!-- ---- Phase 6/7: Generate + downloads ---- -->
+    <fieldset class="panel" id="panel-generate">
+      <legend>Generate</legend>
+      <div id="validation-messages" class="validation-messages"></div>
+      <label class="checkbox-line">
+        <input type="checkbox" id="stream-to-files-checkbox" checked>
+        Stream directly to files when supported (Chrome; avoids large in-memory GCode files)
+      </label>
+      <label class="checkbox-line">
+        <input type="checkbox" id="single-file-checkbox">
+        Combine all passes into one file with tool changes (M6), instead of one file per pass
+      </label>
+      <button type="button" id="generate-btn" disabled>Generate GCode</button>
+      <div id="download-area"></div>
+      <pre id="generate-log" class="log"></pre>
+    </fieldset>
+
+  </section>
+
+  <!-- Draggable divider between controls and preview (desktop widths only). -->
+  <div class="splitter" id="app-splitter" role="separator" aria-orientation="vertical" aria-label="Resize controls and preview columns"></div>
+
+  <!-- ===================== RIGHT COLUMN: PREVIEW ===================== -->
+  <section class="preview" aria-label="Preview">
+    <div class="preview-toolbar">
+      <span id="preview-caption">Preview</span>
+      <!-- Phase 3+: "depth preview" colormap toggle will go here -->
+    </div>
+    <div class="canvas-wrap">
+      <canvas id="preview-canvas" width="512" height="512"></canvas>
+    </div>
+  </section>
+
+</main>
+
+<!--
+  Worker source placeholder (Phase 5). The safe-surface / remaining-material /
+  raster compute worker will be inlined here as a non-executed script block
+  and turned into a Blob URL at runtime (file:// cannot load worker.js
+  directly). Left empty in Phase 1.
+-->
+<script id="worker-src" type="text/js-worker"></script>
+
+<script src="app.js"></script>
+</body>
+</html>

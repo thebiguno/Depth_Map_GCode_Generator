@@ -1,0 +1,459 @@
+/* ============================================================================
+   Browser GCode Generator — base styles
+   Basic responsive two-column layout: controls left, preview right.
+   No frameworks; plain CSS only.
+   ============================================================================ */
+
+:root {
+  --bg: #1e1f22;
+  --panel-bg: #2a2b2e;
+  --panel-border: #3f4044;
+  --text: #e8e8ea;
+  --text-dim: #9a9ba0;
+  --accent: #5b8def;
+  --error: #e5534b;
+  --ok: #3fb950;
+  font-size: 15px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+.app-header {
+  padding: 1rem 1.5rem 0.5rem;
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.app-header h1 {
+  margin: 0 0 0.25rem;
+  font-size: 1.4rem;
+}
+
+.subtitle {
+  margin: 0 0 0.75rem;
+  color: var(--text-dim);
+  font-size: 0.9rem;
+}
+
+/* ---------------------------------------------------------------------------
+   Two-column layout: controls (left) + preview (right), with a draggable
+   splitter between them. The split is driven by the --controls-basis custom
+   property (a percentage) set on .app-layout, either by app.js (drag /
+   restored localStorage value) or defaulted here to 50%.
+   Stacks to a single column on narrow viewports (splitter disabled there).
+   --------------------------------------------------------------------------- */
+.app-layout {
+  --controls-basis: 50%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  padding: 1rem 1.5rem 2rem;
+  align-items: flex-start;
+}
+
+.controls {
+  flex: 1 1 360px;
+  min-width: 280px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+
+.preview {
+  flex: 2 1 480px;
+  min-width: 280px;
+  position: sticky;
+  top: 1rem;
+}
+
+/* Draggable gutter between .controls and .preview. Hidden/inert below the
+   900px breakpoint, where the columns stack instead. */
+.splitter {
+  display: none;
+  flex: 0 0 8px;
+  align-self: stretch;
+  cursor: col-resize;
+  position: relative;
+  border-radius: 4px;
+  background: transparent;
+  touch-action: none;
+}
+
+.splitter::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  transform: translateX(-50%);
+  background: var(--panel-border);
+  border-radius: 1px;
+}
+
+.splitter:hover::before,
+.splitter.is-dragging::before {
+  background: var(--accent);
+  width: 3px;
+}
+
+.splitter:hover,
+.splitter.is-dragging {
+  background: rgba(91, 141, 239, 0.12);
+}
+
+/* While dragging, disable text selection and force the resize cursor
+   everywhere so fast pointer moves don't lose the drag or select page text. */
+body.is-resizing-split {
+  cursor: col-resize;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+@media (min-width: 900.02px) {
+  .app-layout {
+    flex-wrap: nowrap;
+  }
+
+  .controls {
+    flex: 0 0 var(--controls-basis);
+    max-width: none;
+  }
+
+  .preview {
+    flex: 1 1 0;
+  }
+
+  .splitter {
+    display: block;
+  }
+}
+
+@media (max-width: 900px) {
+  .preview {
+    position: static;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Panels (fieldsets) used for each control group.
+   --------------------------------------------------------------------------- */
+.panel {
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 0.75rem 1rem 1rem;
+  /* <fieldset> defaults to min-inline-size: min-content, so a panel with a wide
+     table (Tools/Passes) refuses to shrink to the column and overflows to the
+     right — sliding under the sticky preview. Force it to shrink so the table's
+     own overflow-x:auto scrolls instead. */
+  min-width: 0;
+}
+
+.panel legend {
+  padding: 0 0.4rem;
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+.phase-tag {
+  color: var(--text-dim);
+  font-weight: 400;
+  font-size: 0.8rem;
+}
+
+/* Stub panels for controls implemented in later phases. */
+.panel-stub {
+  opacity: 0.55;
+}
+
+.stub-placeholder {
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  font-style: italic;
+  border: 1px dashed var(--panel-border);
+  border-radius: 6px;
+  padding: 0.6rem;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.9rem;
+}
+
+.field span {
+  color: var(--text-dim);
+}
+
+.radio-line {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  font-weight: 400;
+  color: var(--text);
+}
+
+.checkbox-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.45rem;
+  margin: 0.35rem 0 0.75rem;
+  font-size: 0.85rem;
+  line-height: 1.35;
+  color: var(--text-dim);
+}
+
+.checkbox-line input {
+  margin-top: 0.15rem;
+}
+
+.readout {
+  margin-top: 0.5rem;
+  font-size: 0.82rem;
+  color: var(--text-dim);
+  border-top: 1px dashed var(--panel-border);
+  padding-top: 0.5rem;
+}
+
+input[type="file"] {
+  color: var(--text);
+}
+
+button {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 0.5rem 1rem;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Settings panel: hint text, button row, and status line. */
+.hint {
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  margin: 0 0 0.6rem;
+}
+
+.button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.button-row button {
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  color: var(--text);
+}
+
+.button-row button:hover {
+  border-color: var(--accent);
+}
+
+.status-ok {
+  color: var(--ok);
+}
+
+.status-error {
+  color: var(--error);
+}
+
+/* ---------------------------------------------------------------------------
+   Decode badge + error message
+   --------------------------------------------------------------------------- */
+.badge {
+  display: inline-block;
+  margin-top: 0.6rem;
+  padding: 0.3rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.badge-empty {
+  background: transparent;
+  border: 1px solid var(--panel-border);
+  color: var(--text-dim);
+  font-weight: 400;
+}
+
+.badge-ok {
+  background: rgba(63, 185, 80, 0.15);
+  color: var(--ok);
+  border: 1px solid var(--ok);
+}
+
+.badge-error {
+  background: rgba(229, 83, 75, 0.15);
+  color: var(--error);
+  border: 1px solid var(--error);
+}
+
+.error-message {
+  margin-top: 0.6rem;
+  color: var(--error);
+  font-size: 0.85rem;
+}
+
+/* ---------------------------------------------------------------------------
+   Preview canvas
+   --------------------------------------------------------------------------- */
+.preview-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+  color: var(--text-dim);
+  font-size: 0.85rem;
+}
+
+.canvas-wrap {
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 0.75rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+}
+
+#preview-canvas {
+  /* Scale the (potentially large) depth-map image to fit BOTH the column width
+     and the viewport height, preserving aspect ratio. Without the height cap a
+     big image renders at full intrinsic size, making the sticky preview taller
+     than the viewport (it then runs past the fold and reads as overlapping the
+     form on scroll). Both max-* on a replaced element scale it down to fit. */
+  display: block;
+  max-width: 100%;
+  max-height: calc(100vh - 10rem);
+  width: auto;
+  height: auto;
+  background: #000;
+  image-rendering: pixelated;
+}
+
+.log {
+  background: #111214;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  padding: 0.5rem;
+  font-size: 0.8rem;
+  max-height: 160px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+}
+
+/* ---------------------------------------------------------------------------
+   Tool / pass data tables
+   --------------------------------------------------------------------------- */
+.table-scroll {
+  overflow-x: auto;
+  margin-bottom: 0.6rem;
+}
+
+.data-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.8rem;
+}
+
+.data-table th,
+.data-table td {
+  border: 1px solid var(--panel-border);
+  padding: 0.3rem 0.35rem;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.data-table th {
+  color: var(--text-dim);
+  font-weight: 600;
+  font-size: 0.75rem;
+}
+
+.data-table input[type="text"],
+.data-table input[type="number"],
+.data-table select {
+  width: 6.5rem;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  padding: 0.25rem 0.3rem;
+  font-size: 0.8rem;
+}
+
+.data-table input[type="text"] {
+  width: 8rem;
+}
+
+.data-table input.readonly-derived {
+  width: 5rem;
+  opacity: 0.7;
+}
+
+.data-table input[type="checkbox"] {
+  width: auto;
+}
+
+.data-table .row-btn {
+  padding: 0.2rem 0.5rem;
+  font-size: 0.75rem;
+}
+
+.data-table .row-btn.secondary {
+  background: var(--panel-border);
+}
+
+/* ---------------------------------------------------------------------------
+   Validation messages
+   --------------------------------------------------------------------------- */
+.validation-messages {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-bottom: 0.6rem;
+}
+
+.validation-messages:empty {
+  display: none;
+}
+
+.msg-error,
+.msg-warning {
+  border-radius: 6px;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.82rem;
+}
+
+.msg-error {
+  background: rgba(229, 83, 75, 0.15);
+  border: 1px solid var(--error);
+  color: var(--error);
+}
+
+.msg-warning {
+  background: rgba(210, 153, 34, 0.15);
+  border: 1px solid #d29922;
+  color: #d29922;
+}
