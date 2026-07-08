@@ -52,7 +52,9 @@ These were decided up front and constrain every phase:
 |------|----------------|
 | `index.html` | UI shell: file input, controls, tool/pass tables, preview `<canvas>`, generate button, download area. Inlines the worker source as a non-executed `<script id="worker-src" type="text/js-worker">`. |
 | `styles.css` | Basic responsive two-column layout (controls left, preview right). No frameworks. |
-| `app.js` | UI state, PNG decode, depth mapping, preview render, validation, worker orchestration, GCode assembly, downloads, console tests. |
+| `app.js` | UI state, PNG decode, depth mapping, preview render, validation, worker orchestration, GCode assembly, downloads. |
+| `tests.js` | Browser test registry and synthetic fixtures; loaded by `test.html`, not by the production app page. |
+| `test.html` | Test harness with the DOM fixture `app.js` expects; loads `app.js` + `tests.js` and runs `window.runTests()` automatically. |
 | `worker.js` *(source string)* | Pure compute: safe-surface dilation + remaining-material simulation + raster path generation. Receives typed arrays, posts progress + result. No DOM. |
 | `README.md` | Usage + `file://` limitations + which browsers work. |
 
@@ -254,10 +256,11 @@ passes so later passes know what's actually left.
   `target`):
   1. If `max(remaining[i] - target[i])` over cut pixels `<= tol` (e.g. 1e-4),
      the pass is done.
-  2. Otherwise run one sweep. For each cut position visited along a row, the
-     commanded center Z is `zc = max(target[x,y], remaining[x,y] -
-     effectiveStepdown)` — i.e. remove at most `maxStepdown` below current
-     material, never below target.
+  2. Otherwise snapshot `remaining` at the start of the sweep, then run one
+     sweep. For each cut position visited along a row, the commanded center Z
+     is `zc = max(target[x,y], sweepStartRemaining[x,y] - effectiveStepdown)`
+     — i.e. remove at most `maxStepdown` below the material height at sweep
+     start, never below target.
   3. After a row is cut, **stamp the footprint** into `remaining`: for every
      pixel within `radiusMm` of each cut position, with center Z `zc`:
      `remaining[nx,ny] = min(remaining[nx,ny], zc + bottomOffset(d))`, where
@@ -275,7 +278,8 @@ For each sweep of a pass:
   machine Y goes low→high) stepping by `round(stepoverMm / pixelSizeMm)` pixels
   (min 1). This is the "row cadence".
 - **Row spans**: within a row, find maximal runs of `cut[i]===1`. Only cut inside
-  spans. (Skip transparent gaps with a retract + rapid, see move sequence.)
+  spans. `ltr`/`rtl` skip transparent gaps with a retract + rapid; `zigzag`
+  links spans/rows continuously with feed-rate XY moves.
 - **X order per row by `direction`**:
   - `ltr`: every row left→right.
   - `rtl`: every row right→left (climb-only style; after each row retract to
@@ -298,11 +302,13 @@ G1 X<xEnd> [Z<zc(xEnd)>] F<feedMmMin>
 G0 Z<safeZ>                     // retract at span end
 ```
 
-At row/pass end, retract to `safeZ`. Between spans in the same row, retract to
-`safeZ`, rapid to next span start, plunge again.
+At row/pass end, retract to `safeZ`. Between spans in the same row, `ltr`/`rtl`
+retract to `safeZ`, rapid to next span start, and plunge again. `zigzag`
+does not retract between rows/spans; it raises upward Z-only moves with `G0`,
+then moves XY with `G1` at feed, and plunges downward with `G1`.
 
-> Row-to-row rapids stay at `safeZ` for the first version (simple + safe). The
-> Python's "sampled travel height" optimization is a Non-Goal.
+> Python's "sampled travel height" optimization remains a Non-Goal; zigzag
+> links use the higher adjacent cut Z rather than a sampled clearance surface.
 
 ## GCode Output (exact)
 
@@ -317,7 +323,8 @@ At row/pass end, retract to `safeZ`. Between spans in the same row, retract to
   `stockTopMm`; `safeZMm`; tool name/shape/diameter; pass name/direction/
   stepover/stepdown/allowance; spindle RPM; commanded Z range for the pass
   (min/max, 0.01mm).
-- **Preamble**: `G90` / `G21` / `G17` on separate lines, then `M3 S<rpm>`.
+- **Preamble**: `G90` / `G21` / `G17` on separate lines, then `M3 S<rpm>`,
+  then the first motion line `G0 Z<safeZ>` before any XY move.
 - **No `M0` / pause** anywhere.
 - **Number format**: X/Y/Z to **3 decimals**; feeds as integers. Omit `X`,
   `Y`, `Z`, and `F` words when their formatted modal value is unchanged from
@@ -370,10 +377,11 @@ Warn (allow, but surface a message):
 - `safeZMm <= stockTopMm` (rapids may hit stock).
 - 8-bit fallback used on an image that looks like a terrain map (banding risk).
 
-## Testing (concrete, console-callable)
+## Testing (concrete, browser-callable)
 
-Expose `window.runTests()` that logs pass/fail. Use small synthetic maps with
-known answers:
+Open `test.html` to load `app.js` plus `tests.js` and run `window.runTests()`
+automatically. The function also remains console-callable on that page. Use
+small synthetic maps with known answers:
 
 1. **Depth mapping**: `gray=0 → zAtBlack`, `gray=1 → zAtWhite`, `gray=0.5 →`
    midpoint. Check both zero-modes.
@@ -444,10 +452,11 @@ Each phase lists **deliverable** and **acceptance** (how to know it's done).
    pass leaving `allowance` stock and the finish pass reaching `terrain`.
 
 8. **Tests + fixtures + README + performance pass.**
-   Deliver: `window.runTests()` with all fixtures; README (usage + `file://`
-   caveats + browser support); measure a real project map and, if too slow,
-   apply the O(N·r) decomposition / chunking (no algorithm change to outputs).
-   Accept: `runTests()` all green; a 600×600 map generates in reasonable time in
+   Deliver: `tests.js`/`test.html` with all fixtures and `window.runTests()`;
+   README (usage + `file://` caveats + browser support); measure a real project
+   map and, if too slow, apply the O(N·r) decomposition / chunking (no algorithm
+   change to outputs).
+   Accept: `test.html`/`runTests()` all green; a 600×600 map generates in reasonable time in
    Chrome without freezing the tab (worker keeps UI responsive).
 
 ## Non-Goals (explicitly out of scope for v1)
@@ -457,7 +466,8 @@ Each phase lists **deliverable** and **acceptance** (how to know it's done).
 - **Outline-groove pass** (contour extraction + polygon offsetting).
 - **Arc/line smoothing** (G2/G3 fitting, Douglas-Peucker simplification).
 - **Time estimates** (trapezoidal-acceleration model) in headers.
-- Sampled row-to-row travel-height optimization (rapids stay at `safeZ`).
+- Sampled row-to-row travel-height optimization (`ltr`/`rtl` rapids stay at
+  `safeZ`; zigzag links use adjacent cut Z, not a sampled clearance surface).
 - Metadata sidecar (`.txt`) reading/writing; sea-level/coast-gap semantics.
 - Contour/vector toolpath strategies (raster only).
 

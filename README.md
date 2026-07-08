@@ -88,13 +88,15 @@ quirks), use **Export** — `localStorage` is a convenience, not a guarantee.
   ("spans") are cut left-to-right, right-to-left, or alternating (zigzag),
   evaluating one sample per pixel so Z follows the surface smoothly. Flat
   same-Z runs are emitted as endpoint moves instead of one redundant `X` line
-  per pixel.
-  Transparent gaps are skipped with a retract + rapid.
+  per pixel. In left-to-right and right-to-left rasters, transparent gaps are
+  skipped with a retract + rapid; zigzag links rows/spans with feed-rate `G1`
+  moves and uses `G0` only for upward Z-only raises.
 - **GCode**: `G90`/`G21`/`G17` + `M3 S<rpm>` preamble, one `.nc` file per
   enabled pass with a descriptive comment header (image, scale, zero/origin,
-  tool, pass settings), commanded Z range / sweep summaries, and a
-  `G0 Z<safeZ>` / `M5` / `M2` footer. Modal `X`, `Y`, `Z`, and `F` words are
-  omitted when unchanged. No `M0` (pause) is ever emitted.
+  tool, pass settings), commanded Z range / sweep summaries, an explicit first
+  motion of `G0 Z<safeZ>` before any XY move, and a `G0 Z<safeZ>` / `M5` /
+  `M2` footer. Modal `X`, `Y`, `Z`, and `F` words are omitted when unchanged.
+  No `M0` (pause) is ever emitted.
 
 ## `file://` caveats and browser support
 
@@ -126,9 +128,10 @@ project's fixed workflow. Explicitly out of scope for this version:
 - **No arc smoothing** — all cutting moves are straight `G1` line segments
   (no `G2`/`G3` fitting or path simplification).
 - **No time estimates** in the GCode headers.
-- **No sampled row-to-row travel-height optimization** — rapids between rows
-  and spans always retract to the full `safeZ`, even when a lower travel
-  height would be safe. Simpler and safer, at the cost of some extra travel.
+- **No sampled row-to-row travel-height optimization** — non-zigzag row/span
+  travel retracts to the full `safeZ`, even when a lower travel height would
+  be safe. Zigzag links at the higher adjacent cut Z instead of sampling a
+  separate clearance surface.
 - **No metadata sidecar file** reading/writing.
 - A **flat tool larger than a feature simply rides over it** without cutting
   the interior detail — this is the physically correct behavior for that
@@ -142,11 +145,9 @@ project's fixed workflow. Explicitly out of scope for this version:
 
 ## Testing
 
-Open `index.html` in Chrome, open the DevTools console, and run:
-
-```js
-runTests()
-```
+Open `test.html` in Chrome. It loads `app.js` plus `tests.js`, runs
+`runTests()` automatically, and renders a pass/fail summary with full JSON
+detail on the page. You can also open DevTools and run `runTests()` again.
 
 This runs every registered test in `window.__tests` (depth mapping, origin
 transform, validation rules, safe-surface flat/ball dilation against both an

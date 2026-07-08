@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Depth Map GCode Generator Tests</title>
+<style>
+  body {
+    margin: 0;
+    padding: 24px;
+    font: 14px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    color: #1f2933;
+    background: #f6f8fa;
+  }
+  main {
+    max-width: 1100px;
+    margin: 0 auto;
+  }
+  h1 {
+    margin: 0 0 8px;
+    font-size: 24px;
+  }
+  #summary {
+    margin: 16px 0;
+    padding: 12px 14px;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    background: #fff;
+    font-weight: 700;
+  }
+  #summary.pass {
+    border-color: #86efac;
+    background: #f0fdf4;
+    color: #166534;
+  }
+  #summary.fail {
+    border-color: #fca5a5;
+    background: #fef2f2;
+    color: #991b1b;
+  }
+  #failures,
+  #details {
+    padding: 12px;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    background: #fff;
+    overflow: auto;
+    white-space: pre-wrap;
+  }
+  #failures:empty {
+    display: none;
+  }
+  #app-fixture {
+    display: none;
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>Depth Map GCode Generator Tests</h1>
+  <div id="summary">Running...</div>
+  <pre id="failures"></pre>
+  <pre id="details"></pre>
+</main>
+
+<div id="app-fixture" aria-hidden="true">
+  <input type="file" id="file-input" accept="image/png">
+  <div id="decode-badge"></div>
+  <div id="decode-error" hidden></div>
+  <canvas id="preview-canvas" width="16" height="16"></canvas>
+
+  <input type="radio" name="scale-mode" id="scale-mode-ppm" value="ppm" checked>
+  <input type="radio" name="scale-mode" id="scale-mode-width" value="widthMm">
+  <input type="radio" name="scale-mode" id="scale-mode-height" value="heightMm">
+  <input type="number" id="scale-value" step="any" value="4">
+  <span id="scale-value-label"></span>
+  <div id="scale-readout"></div>
+
+  <select id="zero-mode">
+    <option value="bed" selected>Bed</option>
+    <option value="stockTop">Stock top</option>
+  </select>
+  <input type="number" id="black-input" step="any" value="3">
+  <input type="number" id="white-input" step="any" value="38">
+  <span id="black-input-label"></span>
+  <span id="white-input-label"></span>
+  <label id="stock-top-field"><input type="number" id="stock-top-input" step="any"></label>
+  <input type="number" id="safe-z-input" step="any">
+  <select id="origin-mode">
+    <option value="center" selected>Center</option>
+    <option value="lowerLeft">Lower-left</option>
+  </select>
+  <div id="depth-readout"></div>
+
+  <table><tbody id="tool-table-body"></tbody></table>
+  <button type="button" id="add-tool-btn">Add tool</button>
+
+  <table>
+    <thead>
+      <tr>
+        <th id="th-outline-width">Outline Width</th>
+        <th id="th-outline-depth">Outline Depth</th>
+      </tr>
+    </thead>
+    <tbody id="pass-table-body"></tbody>
+  </table>
+  <button type="button" id="add-pass-btn">Add pass</button>
+
+  <div id="validation-messages"></div>
+  <button type="button" id="generate-btn">Generate</button>
+  <input type="checkbox" id="stream-to-files-checkbox" checked>
+  <input type="checkbox" id="single-file-checkbox">
+
+  <button type="button" id="settings-export-btn">Export</button>
+  <button type="button" id="settings-import-btn">Import</button>
+  <input type="file" id="settings-import-input">
+  <button type="button" id="settings-reset-btn">Reset</button>
+  <div id="settings-status"></div>
+
+  <div class="app-layout"><div class="controls"></div></div>
+  <div id="app-splitter"></div>
+  <div id="download-area"></div>
+  <pre id="generate-log"></pre>
+</div>
+
+<script>
+(function () {
+  const store = Object.create(null);
+  const storage = {
+    get length() {
+      return Object.keys(store).length;
+    },
+    key(index) {
+      return Object.keys(store)[index] || null;
+    },
+    getItem(key) {
+      return Object.prototype.hasOwnProperty.call(store, key) ? store[key] : null;
+    },
+    setItem(key, value) {
+      store[key] = String(value);
+    },
+    removeItem(key) {
+      delete store[key];
+    },
+    clear() {
+      for (const key of Object.keys(store)) delete store[key];
+    },
+  };
+  Object.defineProperty(window, "localStorage", { value: storage, configurable: true });
+}());
+</script>
+<script src="app.js"></script>
+<script src="tests.js"></script>
+<script>
+(function () {
+  const summaryEl = document.getElementById("summary");
+  const failuresEl = document.getElementById("failures");
+  const detailsEl = document.getElementById("details");
+
+  function render(result) {
+    const names = Object.keys(result.results || {});
+    const failures = names.filter((name) => !result.results[name] || !result.results[name].pass);
+    summaryEl.className = result.allPass ? "pass" : "fail";
+    summaryEl.textContent = result.allPass
+      ? `ALL PASS (${names.length} tests)`
+      : `FAILURES (${failures.length} of ${names.length} tests failed)`;
+    failuresEl.textContent = failures.map((name) => {
+      const entry = result.results[name];
+      return `${name}: ${entry && entry.error ? entry.error : JSON.stringify(entry && entry.detail, null, 2)}`;
+    }).join("\n\n");
+    detailsEl.textContent = JSON.stringify(result, null, 2);
+  }
+
+  try {
+    render(window.runTests());
+  } catch (err) {
+    render({
+      allPass: false,
+      results: {
+        harness: {
+          pass: false,
+          error: String(err && err.stack ? err.stack : err),
+        },
+      },
+    });
+  }
+}());
+</script>
+</body>
+</html>
