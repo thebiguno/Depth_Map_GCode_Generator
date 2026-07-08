@@ -1348,7 +1348,7 @@ function seedDefaults() {
     makePass({
       name: "Rough",
       toolId: flatTool.id,
-      direction: "rtl",
+      direction: "xClimb",
       stepoverMm: null,
       maxStepdownMm: null,
       allowanceMm: 0.8,
@@ -1357,7 +1357,7 @@ function seedDefaults() {
     makePass({
       name: "Finish",
       toolId: ballTool.id,
-      direction: "zigzag",
+      direction: "xBoth",
       stepoverMm: null,
       maxStepdownMm: null,
       allowanceMm: 0,
@@ -1546,7 +1546,15 @@ function renderPassTable() {
     })));
 
     tr.appendChild(makeTableCell(makeSelectInput(
-      [["ltr", "Left→Right"], ["rtl", "Right→Left"], ["zigzag", "Zigzag"], ["outline", "Outline"]],
+      [
+        ["xConventional", "Sweep X (Conventional)"],
+        ["xClimb", "Sweep X (Climb)"],
+        ["xBoth", "Sweep X (Both)"],
+        ["yConventional", "Sweep Y (Conventional)"],
+        ["yClimb", "Sweep Y (Climb)"],
+        ["yBoth", "Sweep Y (Both)"],
+        ["outline", "Outline"],
+      ],
       pass.direction,
       (val) => {
         pass.direction = val;
@@ -1671,7 +1679,7 @@ function addPass() {
   currentJobSpec.passes.push(makePass({
     name: "Pass_" + passIdCounter,
     toolId: defaultToolId,
-    direction: "ltr",
+    direction: "xConventional",
     stepoverMm: null,
     maxStepdownMm: null,
     allowanceMm: 0,
@@ -1814,6 +1822,9 @@ function validateJob(jobSpec, tools, heightMap) {
     if (pass.maxStepdownMm != null && !(pass.maxStepdownMm > 0)) {
       errors.push(`Pass "${pass.name}" has an invalid max stepdown override (must be > 0 when set).`);
     }
+    if (pass.direction !== "outline" && !isRasterDirection(pass.direction)) {
+      errors.push(`Pass "${pass.name}" has an unknown raster direction "${pass.direction}".`);
+    }
 
     if (pass.direction === "outline") {
       if (!(Number.isFinite(pass.outlineWidthMm) && pass.outlineWidthMm > 0)) {
@@ -1871,7 +1882,7 @@ function validateJob(jobSpec, tools, heightMap) {
     if (Number.isFinite(effectiveStepover) && Number.isFinite(tool.diameterMm) &&
         effectiveStepover > tool.diameterMm) {
       warnings.push(
-        `Pass "${pass.name}" effective stepover (${effectiveStepover}mm) exceeds tool "${tool.name}" diameter (${tool.diameterMm}mm) — uncut ridges may remain between rows.`
+        `Pass "${pass.name}" effective stepover (${effectiveStepover}mm) exceeds tool "${tool.name}" diameter (${tool.diameterMm}mm) — uncut ridges may remain between raster tracks.`
       );
     }
   }
@@ -2026,6 +2037,15 @@ function normalizeTool(t) {
   };
 }
 
+function normalizePassDirection(direction) {
+  if (direction === "xConventional" || direction === "xClimb" || direction === "xBoth" ||
+      direction === "yConventional" || direction === "yClimb" || direction === "yBoth" ||
+      direction === "outline") {
+    return direction;
+  }
+  return "xConventional";
+}
+
 /** Coerce a restored pass object into a valid PassSpec (null stepover/stepdown
  *  preserved as "use tool default"). */
 function normalizePass(p) {
@@ -2035,7 +2055,7 @@ function normalizePass(p) {
     id: typeof p.id === "string" && p.id ? p.id : nextPassId(),
     name: p.name == null ? "pass" : String(p.name),
     toolId: p.toolId == null ? "" : String(p.toolId),
-    direction: p.direction === "rtl" || p.direction === "zigzag" || p.direction === "outline" ? p.direction : "ltr",
+    direction: normalizePassDirection(p.direction),
     stepoverMm: nullableNum(p.stepoverMm),
     maxStepdownMm: nullableNum(p.maxStepdownMm),
     allowanceMm: Number(p.allowanceMm),
@@ -3317,6 +3337,11 @@ function buildWorkerSource() {
     stampToolFootprintAt.toString(),
     stampToolpathSegment.toString(),
     findRowSpans.toString(),
+    findColumnSpans.toString(),
+    isYAxisRasterDirection.toString(),
+    isRasterDirection.toString(),
+    isBothRasterDirection.toString(),
+    forEachRasterCutPosition.toString(),
     cutMaskSegmentIsClear.toString(),
     pixelCenterToMachineXY.toString(),
     formatCoord.toString(),
@@ -3718,7 +3743,7 @@ function runGenerateJobInWorker(params, onProgress, onStream) {
 // RASTER GENERATION + GCODE OUTPUT HELPERS. See Design.md "Raster Generation
 // (exact)", "Remaining-Material Model (exact)", and "GCode Output (exact)".
 //
-// This is deliberately structured so Phase 7 can wrap the row/span/sweep
+// This is deliberately structured so Phase 7 can wrap the track/span/sweep
 // emission in a multi-sweep loop: emitRasterSweepMoves() below takes a
 // `zAtFn(px, py)` callback for the commanded cut Z at a pixel, rather than
 // reading a single target surface directly. Phase 6 calls it once per pass
@@ -3999,7 +4024,7 @@ function formatFeed(v) {
 /**
  * Find maximal runs ("spans") of cut===1 pixels within a single image row.
  * Pure helper, no DOM. Returns spans as [startPx, endPx] inclusive, in
- * ascending px order (left to right); callers reverse for rtl/zigzag.
+ * ascending px order (left to right); callers reverse as needed.
  * @param {Uint8Array} cut - full HeightMap.cut array, row-major.
  * @param {number} width
  * @param {number} py - row index (image space).
@@ -4023,9 +4048,80 @@ function findRowSpans(cut, width, py) {
 }
 
 /**
+ * Find maximal runs ("spans") of cut===1 pixels within a single image column.
+ * Returns spans as [startPy, endPy] inclusive, ascending in image-space y.
+ * @param {Uint8Array} cut - full HeightMap.cut array, row-major.
+ * @param {number} width
+ * @param {number} height
+ * @param {number} px - column index (image space).
+ * @returns {Array<[number, number]>}
+ */
+function findColumnSpans(cut, width, height, px) {
+  const spans = [];
+  let spanStart = -1;
+  for (let py = 0; py < height; py++) {
+    const isCut = cut[py * width + px] === 1;
+    if (isCut && spanStart === -1) {
+      spanStart = py;
+    } else if (!isCut && spanStart !== -1) {
+      spans.push([spanStart, py - 1]);
+      spanStart = -1;
+    }
+  }
+  if (spanStart !== -1) spans.push([spanStart, height - 1]);
+  return spans;
+}
+
+function isYAxisRasterDirection(direction) {
+  return direction === "yConventional" || direction === "yClimb" || direction === "yBoth";
+}
+
+function isRasterDirection(direction) {
+  return direction === "xConventional" || direction === "xClimb" || direction === "xBoth" ||
+    direction === "yConventional" || direction === "yClimb" || direction === "yBoth";
+}
+
+function isBothRasterDirection(direction) {
+  return direction === "xBoth" || direction === "yBoth";
+}
+
+/**
+ * Visit every raster cut-center position used by a pass direction. Order is not
+ * significant; this is used by the fixpoint preflight check.
+ * @param {Uint8Array} cut
+ * @param {number} width
+ * @param {number} height
+ * @param {number} trackStep
+ * @param {string} direction
+ * @param {(px:number, py:number)=>void} cb
+ */
+function forEachRasterCutPosition(cut, width, height, trackStep, direction, cb) {
+  if (!isRasterDirection(direction)) {
+    throw new Error("forEachRasterCutPosition: unknown raster direction " + direction);
+  }
+  if (isYAxisRasterDirection(direction)) {
+    for (let px = 0; px < width; px += trackStep) {
+      const spans = findColumnSpans(cut, width, height, px);
+      for (const span of spans) {
+        for (let py = span[0]; py <= span[1]; py++) cb(px, py);
+      }
+    }
+    return;
+  }
+
+  for (let py = height - 1; py >= 0; py -= trackStep) {
+    const spans = findRowSpans(cut, width, py);
+    for (const span of spans) {
+      for (let px = span[0]; px <= span[1]; px++) cb(px, py);
+    }
+  }
+}
+
+/**
  * Return true when the straight pixel-space segment from one cut center to the
- * next stays on cut===1 pixels. Used to decide whether a zigzag transition can
- * remain down at feed, or must retract and rapid over a transparent gap.
+ * next stays on cut===1 pixels. Used to decide whether a both-direction raster
+ * transition can remain down at feed, or must retract and rapid over a
+ * transparent gap.
  * @param {Uint8Array} cut
  * @param {number} width
  * @param {number} height
@@ -4051,8 +4147,8 @@ function cutMaskSegmentIsClear(cut, width, height, x0, y0, x1, y1) {
 
 /**
  * Emit the GCode move lines (as an array of strings, appended to `lines`) for
- * one full raster sweep over a pass's enabled rows, per Design.md "Raster
- * Generation (exact)" — rows, spans, direction, move sequence. This is the
+ * one full raster sweep over a pass's enabled tracks, per Design.md "Raster
+ * Generation (exact)" — tracks, spans, direction, move sequence. This is the
  * reusable "sweep" helper: Phase 7 can call it multiple times per pass (once
  * per depth-stepping sweep) with a different `zAtFn`; Phase 6 calls it once.
  *
@@ -4067,8 +4163,8 @@ function cutMaskSegmentIsClear(cut, width, height, x0, y0, x1, y1) {
  * @param {number} params.height
  * @param {number} params.pixelSizeMm
  * @param {"center"|"lowerLeft"} params.originMode
- * @param {number} params.rowStep - pixel stride between rows (>=1).
- * @param {"ltr"|"rtl"|"zigzag"} params.direction
+ * @param {number} params.rowStep - pixel stride between raster tracks (>=1).
+ * @param {"xConventional"|"xClimb"|"xBoth"|"yConventional"|"yClimb"|"yBoth"} params.direction
  * @param {(px:number, py:number)=>number} params.zAtFn - commanded cut Z at a pixel.
  * @param {number} params.safeZMm
  * @param {number} params.feedMmMin
@@ -4080,10 +4176,10 @@ function cutMaskSegmentIsClear(cut, width, height, x0, y0, x1, y1) {
  *   from the previous move"), X/Y/Z/F words are only written when they differ
  *   from this state.
  * @param {(cutPositions: Array<{px:number, py:number, zc:number}>)=>void} [params.afterRow] -
- *   optional (Phase 7): called once per row, immediately after that row's
- *   moves are emitted (and BEFORE the next row's zAtFn calls), with every cut
- *   position visited in that row (across all its spans) in emission order.
- *   Lets a caller "stamp" a remaining-material simulation between rows
+ *   optional (Phase 7): called once per raster track, immediately after that
+ *   track's moves are emitted, with every cut position visited in that track
+ *   (across all its spans) in emission order.
+ *   Lets a caller "stamp" a remaining-material simulation between tracks
  *   without this function needing to know anything about remaining/stamping.
  *   Backward-compatible: omitting it changes nothing about emitted GCode.
  * @returns {{zMin:number, zMax:number, atSafeZ:boolean, modalState:{x:?string,y:?string,z:?string,f:?string}}}
@@ -4105,8 +4201,13 @@ function emitRasterSweepMoves(params) {
   let zMin = Infinity;
   let zMax = -Infinity;
 
-  const isZigzag = direction === "zigzag";
-  let lastCutZnum = null; // numeric Z of the last emitted cut position (for zig-zag transitions)
+  if (!isRasterDirection(direction)) {
+    throw new Error("emitRasterSweepMoves: unknown raster direction " + direction);
+  }
+
+  const isYAxis = isYAxisRasterDirection(direction);
+  const isBoth = isBothRasterDirection(direction);
+  let lastCutZnum = null; // numeric Z of the last emitted cut position (for both-direction transitions)
   let lastCutPx = null;
   let lastCutPy = null;
 
@@ -4124,85 +4225,92 @@ function emitRasterSweepMoves(params) {
     }
   }
 
-  // rowOrder: iterate py from bottom of image upward (largest py first), so
-  // machine Y goes low->high, stepping by rowStep pixels.
-  let rowIndex = 0;
-  for (let py = height - 1; py >= 0; py -= rowStep) {
-    let spans = findRowSpans(cut, width, py);
+  function makePoint(trackCoord, sweepCoord) {
+    return isYAxis
+      ? { px: trackCoord, py: sweepCoord }
+      : { px: sweepCoord, py: trackCoord };
+  }
+
+  function emitTrack(trackCoord, trackIndex) {
+    const spans = isYAxis
+      ? findColumnSpans(cut, width, height, trackCoord)
+      : findRowSpans(cut, width, trackCoord);
     if (spans.length === 0) {
-      rowIndex++;
-      continue;
+      return;
     }
 
-    // Determine this row's left-to-right-ness per `direction`.
-    let rowLtr;
-    if (direction === "ltr") {
-      rowLtr = true;
-    } else if (direction === "rtl") {
-      rowLtr = false;
+    let sweepForward;
+    if (isYAxis) {
+      if (direction === "yConventional") {
+        sweepForward = true;  // top-to-bottom in machine Y is py low->high.
+      } else if (direction === "yClimb") {
+        sweepForward = false; // bottom-to-top in machine Y is py high->low.
+      } else {
+        sweepForward = trackIndex % 2 === 0; // yBoth starts conventional.
+      }
     } else {
-      // zigzag: alternate, starting ltr on the first cut row.
-      rowLtr = rowIndex % 2 === 0;
+      if (direction === "xConventional") {
+        sweepForward = true;
+      } else if (direction === "xClimb") {
+        sweepForward = false;
+      } else if (direction === "xBoth") {
+        sweepForward = trackIndex % 2 === 0; // xBoth starts conventional (+X).
+      } else {
+        throw new Error("emitRasterSweepMoves: unknown X raster direction " + direction);
+      }
     }
 
-    // Order spans left->right for ltr rows, right->left for rtl/zigzag-odd
-    // rows (both the span order and the direction sampled within each span).
-    const orderedSpans = rowLtr ? spans : spans.slice().reverse();
+    const orderedSpans = sweepForward ? spans : spans.slice().reverse();
 
-    const { y } = pixelCenterToMachineXY(0, py, pixelSizeMm, width, height, originMode);
-
-    // Collects every cut position visited in THIS row (across all its
-    // spans), in emission order, so afterRow can be called once per row —
-    // all of a row's zc values are computed here (from zAtFn) before any of
-    // them are stamped (that happens after the row, in afterRow).
-    const rowCutPositions = afterRow ? [] : null;
+    // Collect every cut position visited in THIS track before stamping it.
+    const trackCutPositions = afterRow ? [] : null;
 
     for (const span of orderedSpans) {
-      const [spanStartPx, spanEndPx] = span;
-      // Build the ordered list of px positions to sample across this span,
-      // 1 pixel at a time (per spec), in the row's direction.
-      const pxList = [];
-      if (rowLtr) {
-        for (let px = spanStartPx; px <= spanEndPx; px++) pxList.push(px);
+      const [spanStart, spanEnd] = span;
+      // Build the ordered list of pixel positions to sample across this span,
+      // 1 pixel at a time (per spec), in the track's sweep direction.
+      const sweepList = [];
+      if (sweepForward) {
+        for (let p = spanStart; p <= spanEnd; p++) sweepList.push(p);
       } else {
-        for (let px = spanEndPx; px >= spanStartPx; px--) pxList.push(px);
+        for (let p = spanEnd; p >= spanStart; p--) sweepList.push(p);
       }
 
-      const x0px = pxList[0];
-      const { x: x0 } = pixelCenterToMachineXY(x0px, py, pixelSizeMm, width, height, originMode);
-      const zc0 = zAtFn(x0px, py);
+      const startPt = makePoint(trackCoord, sweepList[0]);
+      const startMachine = pixelCenterToMachineXY(startPt.px, startPt.py, pixelSizeMm, width, height, originMode);
+      const zc0 = zAtFn(startPt.px, startPt.py);
 
-      const canFeedLink = isZigzag && !atSafeZ && lastCutZnum != null &&
+      const canFeedLink = isBoth && !atSafeZ && lastCutZnum != null &&
         lastCutPx != null && lastCutPy != null &&
-        cutMaskSegmentIsClear(cut, width, height, lastCutPx, lastCutPy, x0px, py);
+        cutMaskSegmentIsClear(cut, width, height, lastCutPx, lastCutPy, startPt.px, startPt.py);
 
       if (canFeedLink) {
-        // Zig-zag inter-segment transition WITHOUT retracting to safe Z:
+        // Both-direction inter-segment transition WITHOUT retracting to safe Z:
         // travel XY at the higher of (current Z, next-start Z) so both
         // endpoints clear, then step to the start Z. The XY move may still
         // be cutting material, so it must use G1/feed; only upward Z-only
         // motion is rapid.
         if (zc0 > lastCutZnum) {
           emitMotionLine("G0", { z: zc0 });                 // raise first (rapid up is safe)
-          emitMotionLine("G1", { x: x0, y, f: feedMmMin }); // then feed across at cutting depth
+          emitMotionLine("G1", { x: startMachine.x, y: startMachine.y, f: feedMmMin }); // then feed across at cutting depth
         } else {
-          emitMotionLine("G1", { x: x0, y, f: feedMmMin }); // feed across at current (higher) Z
+          emitMotionLine("G1", { x: startMachine.x, y: startMachine.y, f: feedMmMin }); // feed across at current (higher) Z
           if (zc0 < lastCutZnum) {
             emitMotionLine("G1", { z: zc0, f: plungeMmMin }); // then controlled plunge down
           }
         }
       } else {
         ensureSafeZ();
-        emitMotionLine("G0", { x: x0, y });
+        emitMotionLine("G0", { x: startMachine.x, y: startMachine.y });
         emitMotionLine("G1", { z: zc0, f: plungeMmMin });
       }
       atSafeZ = false;
       lastCutZnum = zc0;
-      lastCutPx = x0px;
-      lastCutPy = py;
+      lastCutPx = startPt.px;
+      lastCutPy = startPt.py;
       if (zc0 < zMin) zMin = zc0;
       if (zc0 > zMax) zMax = zc0;
-      if (rowCutPositions) rowCutPositions.push({ px: x0px, py, zc: zc0 });
+      if (trackCutPositions) trackCutPositions.push({ px: startPt.px, py: startPt.py, zc: zc0 });
 
       let runFirst = null;
       let runLast = null;
@@ -4214,25 +4322,25 @@ function emitRasterSweepMoves(params) {
         if (!runFirst) return;
         const firstChangesZ = runFirst.zStr !== modal.z;
         if (firstChangesZ) {
-          emitMotionLine("G1", { x: runFirst.x, z: runFirst.zc, f: feedMmMin });
+          emitMotionLine("G1", { x: runFirst.x, y: runFirst.y, z: runFirst.zc, f: feedMmMin });
         }
         if (runLast !== runFirst || !firstChangesZ) {
-          emitMotionLine("G1", { x: runLast.x, z: runLast.zc, f: feedMmMin });
+          emitMotionLine("G1", { x: runLast.x, y: runLast.y, z: runLast.zc, f: feedMmMin });
         }
       }
 
-      for (let k = 1; k < pxList.length; k++) {
-        const px = pxList[k];
-        const { x } = pixelCenterToMachineXY(px, py, pixelSizeMm, width, height, originMode);
-        const zc = zAtFn(px, py);
+      for (let k = 1; k < sweepList.length; k++) {
+        const pt = makePoint(trackCoord, sweepList[k]);
+        const { x, y } = pixelCenterToMachineXY(pt.px, pt.py, pixelSizeMm, width, height, originMode);
+        const zc = zAtFn(pt.px, pt.py);
         if (zc < zMin) zMin = zc;
         if (zc > zMax) zMax = zc;
         lastCutZnum = zc;
-        lastCutPx = px;
-        lastCutPy = py;
-        if (rowCutPositions) rowCutPositions.push({ px, py, zc });
+        lastCutPx = pt.px;
+        lastCutPy = pt.py;
+        if (trackCutPositions) trackCutPositions.push({ px: pt.px, py: pt.py, zc });
 
-        const sample = { x, zc, zStr: formatCoord(zc) };
+        const sample = { x, y, zc, zStr: formatCoord(zc) };
         if (!runFirst) {
           runFirst = sample;
           runLast = sample;
@@ -4248,23 +4356,35 @@ function emitRasterSweepMoves(params) {
       }
       flushCutRun();
 
-      // Retract at span end except for zig-zag. Zig-zag decides at the next
-      // segment whether it can feed-link through cut pixels or must retract
-      // before crossing a masked gap.
-      if (!isZigzag) {
+      // Retract at span end except for both-direction sweeps. They decide at
+      // the next segment whether they can feed-link through cut pixels or must
+      // retract before crossing a masked gap.
+      if (!isBoth) {
         emitMotionLine("G0", { z: safeZMm });
         atSafeZ = true;
       }
     }
 
-    if (afterRow) afterRow(rowCutPositions);
-
-    rowIndex++;
+    if (afterRow) afterRow(trackCutPositions);
   }
 
-  // Zig-zag may leave the tool down between clear in-mask segments; ensure the
+  let trackIndex = 0;
+  if (isYAxis) {
+    for (let px = 0; px < width; px += rowStep) {
+      emitTrack(px, trackIndex);
+      trackIndex++;
+    }
+  } else {
+    // X sweeps iterate tracks bottom-to-top: py high->low, machine Y low->high.
+    for (let py = height - 1; py >= 0; py -= rowStep) {
+      emitTrack(py, trackIndex);
+      trackIndex++;
+    }
+  }
+
+  // Both-direction sweeps may leave the tool down between clear in-mask segments; ensure the
   // sweep ends at safe Z so the next sweep / pass footer starts clean. (No-op
-  // for ltr/rtl, which already retracted at each span end.)
+  // for one-way sweeps, which already retracted at each span end.)
   if (!atSafeZ) {
     emitMotionLine("G0", { z: safeZMm });
     atSafeZ = true;
@@ -4385,7 +4505,7 @@ function generatePassGCode(params) {
    * Is any cut pixel still more than tol above its target? Used ONLY as the
    * initial gate: if the surface is already at/below target everywhere cut,
    * the pass has nothing to do and emits zero sweeps. It must NOT be used as
-   * the loop-continuation condition — with stepover > 1px, between-row pixels
+   * the loop-continuation condition — with stepover > 1px, between-track pixels
    * are never cut centers (they're only lowered by neighbors' footprint
    * spillover) and can permanently plateau above their own target[i], so this
    * check can stay true forever even after material stops being removed.
@@ -4436,18 +4556,16 @@ function generatePassGCode(params) {
   }
 
   function wouldNextSweepChange() {
-    for (let py = height - 1; py >= 0; py -= rowStep) {
-      const spans = findRowSpans(cut, width, py);
-      for (let s = 0; s < spans.length; s++) {
-        const span = spans[s];
-        for (let px = span[0]; px <= span[1]; px++) {
-          const i = py * width + px;
-          const zc = Math.max(targetSurface[i], remaining[i] - effectiveStepdown);
-          if (stampWouldChangeAt(px, py, zc)) return true;
-        }
+    let wouldChange = false;
+    forEachRasterCutPosition(cut, width, height, rowStep, pass.direction, (px, py) => {
+      if (wouldChange) return;
+      const i = py * width + px;
+      const zc = Math.max(targetSurface[i], remaining[i] - effectiveStepdown);
+      if (stampWouldChangeAt(px, py, zc)) {
+        wouldChange = true;
       }
-    }
-    return false;
+    });
+    return wouldChange;
   }
 
   if (bodyOnly) {
@@ -4495,15 +4613,15 @@ function generatePassGCode(params) {
     const modalStateBefore = { ...modalState };
 
     // Step 2: commanded zc per pixel, computed from `remaining` as it stood
-    // before this sweep started. This prevents a wide tool's row footprint
-    // from lowering later rows and causing multiple stepdowns in one sweep.
+    // before this sweep started. This prevents a wide tool's track footprint
+    // from lowering later tracks and causing multiple stepdowns in one sweep.
     const sweepStartRemaining = remaining.slice();
     const zAtFn = (px, py) => {
       const i = py * width + px;
       return Math.max(targetSurface[i], sweepStartRemaining[i] - effectiveStepdown);
     };
 
-    // Step 3: after a row's moves are emitted, stamp that row's cut positions
+    // Step 3: after a track's moves are emitted, stamp that track's cut positions
     // into `remaining` using each position's own commanded zc. Track whether
     // ANY stamp in this sweep actually lowered `remaining` (removed material)
     // — that's the fixpoint / convergence signal for the loop below.
@@ -4538,7 +4656,7 @@ function generatePassGCode(params) {
     // material. `remaining` is only ever lowered by stamps and is bounded
     // below by target/terrain, so this is a monotone-decreasing, bounded
     // process — once a sweep changes nothing, no future sweep ever will. This
-    // is the ONLY sound convergence test: with stepover > 1px, between-row
+    // is the ONLY sound convergence test: with stepover > 1px, between-track
     // pixels are never cut centers and can permanently plateau above their
     // own target[i], so a "some cut pixel still above target" test would loop
     // forever (the bug this fixes). It's also unsound to check only visited

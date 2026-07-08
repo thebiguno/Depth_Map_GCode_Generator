@@ -154,8 +154,8 @@ window.__tests.validation = function () {
         stockTopMm: 38,
         safeZMm: 43,
         passes: [
-          { id: "p1", name: "Rough", toolId: "t1", direction: "rtl", stepoverMm: null, maxStepdownMm: null, allowanceMm: 0.8, enabled: true },
-          { id: "p2", name: "Finish", toolId: "t2", direction: "zigzag", stepoverMm: null, maxStepdownMm: null, allowanceMm: 0, enabled: true },
+          { id: "p1", name: "Rough", toolId: "t1", direction: "xClimb", stepoverMm: null, maxStepdownMm: null, allowanceMm: 0.8, enabled: true },
+          { id: "p2", name: "Finish", toolId: "t2", direction: "xBoth", stepoverMm: null, maxStepdownMm: null, allowanceMm: 0, enabled: true },
         ],
       },
       overrides || {}
@@ -239,15 +239,15 @@ window.__tests.validationRejectsBadPassNumbers = function () {
     return { imageName: "t.png", widthPx: 10, heightPx: 10, pixelSizeMm: 0.25, zAtBlackMm: 3, zAtWhiteMm: 38, zeroMode: "bed", originMode: "center", stockTopMm: 38, safeZMm: 43, passes: passes };
   }
   {
-    const { errors } = validateJob(job([{ id: "p1", name: "R", toolId: "t1", direction: "rtl", stepoverMm: null, maxStepdownMm: 0, allowanceMm: 0, enabled: true }]), tools, hm);
+    const { errors } = validateJob(job([{ id: "p1", name: "R", toolId: "t1", direction: "xClimb", stepoverMm: null, maxStepdownMm: 0, allowanceMm: 0, enabled: true }]), tools, hm);
     checks.push(["pass maxStepdown=0 -> error", errors.some((e) => /max stepdown/i.test(e))]);
   }
   {
-    const { errors } = validateJob(job([{ id: "p1", name: "R", toolId: "t1", direction: "rtl", stepoverMm: -1, maxStepdownMm: null, allowanceMm: 0, enabled: true }]), tools, hm);
+    const { errors } = validateJob(job([{ id: "p1", name: "R", toolId: "t1", direction: "xClimb", stepoverMm: -1, maxStepdownMm: null, allowanceMm: 0, enabled: true }]), tools, hm);
     checks.push(["pass stepover=-1 -> error", errors.some((e) => /stepover override/i.test(e))]);
   }
   {
-    const { errors } = validateJob(job([{ id: "p1", name: "R", toolId: "t1", direction: "rtl", stepoverMm: null, maxStepdownMm: null, allowanceMm: NaN, enabled: true }]), tools, hm);
+    const { errors } = validateJob(job([{ id: "p1", name: "R", toolId: "t1", direction: "xClimb", stepoverMm: null, maxStepdownMm: null, allowanceMm: NaN, enabled: true }]), tools, hm);
     checks.push(["raster NaN allowance -> error", errors.some((e) => /allowance/i.test(e))]);
   }
   {
@@ -255,7 +255,7 @@ window.__tests.validationRejectsBadPassNumbers = function () {
     checks.push(["outline depth>=stockTop -> error", errors.some((e) => /stock top/i.test(e))]);
   }
   {
-    const { errors } = validateJob(job([{ id: "p1", name: "R", toolId: "t1", direction: "rtl", stepoverMm: null, maxStepdownMm: null, allowanceMm: 0.5, enabled: true }]), tools, hm);
+    const { errors } = validateJob(job([{ id: "p1", name: "R", toolId: "t1", direction: "xClimb", stepoverMm: null, maxStepdownMm: null, allowanceMm: 0.5, enabled: true }]), tools, hm);
     checks.push(["valid pass -> 0 errors", errors.length === 0]);
   }
   const pass = checks.every(([, ok]) => ok);
@@ -289,7 +289,7 @@ window.__tests.gcodeOutputIsAscii = function () {
     feedMmMin: 1000, plungeMmMin: 300, spindleRpm: 12000,
   };
   const pass = {
-    id: "p1", name: "páss→rough", toolId: tool.id, direction: "ltr",
+    id: "p1", name: "páss→rough", toolId: tool.id, direction: "xConventional",
     stepoverMm: null, maxStepdownMm: null, allowanceMm: 0, enabled: true,
   };
   const jobSpec = {
@@ -377,7 +377,7 @@ window.__tests.toolNumberValidation = function () {
   function tool(id, num) {
     return { id: id, name: id, shape: "flat", diameterMm: 6, radiusMm: 3, stepoverMm: 3, maxStepdownMm: 3, feedMmMin: 1000, plungeMmMin: 500, spindleRpm: 12000, toolNumber: num };
   }
-  const passes = [{ id: "p1", name: "R", toolId: "t1", direction: "rtl", stepoverMm: null, maxStepdownMm: null, allowanceMm: 0, enabled: true }];
+  const passes = [{ id: "p1", name: "R", toolId: "t1", direction: "xClimb", stepoverMm: null, maxStepdownMm: null, allowanceMm: 0, enabled: true }];
   {
     const { errors } = validateJob(job(passes), [tool("t1", 1.5)], hm);
     checks.push(["non-integer tool number -> error", errors.some((e) => /tool number/i.test(e))]);
@@ -402,21 +402,21 @@ window.__tests.toolNumberValidation = function () {
   return { pass, detail: { checks } };
 };
 
-window.__tests.zigzagSinglePixelSpanRetractsAcrossGap = function () {
+window.__tests.sweepXBothSinglePixelSpanRetractsAcrossGap = function () {
   const checks = [];
   const width = 6, height = 2;
   const cut = new Uint8Array(width * height);
-  // Bottom row (py=1, cut first, ltr): pixels 0,1,2 (left half).
+  // Bottom row (py=1, cut first, xBoth starts conventional): pixels 0,1,2.
   cut[1 * width + 0] = 1; cut[1 * width + 1] = 1; cut[1 * width + 2] = 1;
   // Top row (py=0, cut second): a single isolated pixel at px=5 (far right).
   cut[0 * width + 5] = 1;
   const lines = [];
   // py=1 cuts at Z=-2; the lone py=0 pixel is shallower (Z=-1), which would
-  // otherwise tempt zigzag to link across the transparent gap at cutting depth.
+  // otherwise tempt xBoth to link across the transparent gap at cutting depth.
   const zAtFn = (px, py) => (py === 1 ? -2 : -1);
   emitRasterSweepMoves({
     lines: lines, cut: cut, width: width, height: height, pixelSizeMm: 1,
-    originMode: "center", rowStep: 1, direction: "zigzag", zAtFn: zAtFn,
+    originMode: "center", rowStep: 1, direction: "xBoth", zAtFn: zAtFn,
     safeZMm: 5, feedMmMin: 1000, plungeMmMin: 300, atSafeZ: true,
   });
   // Machine X of the isolated pixel px=5: (5 + 0.5 - 6/2) * 1 = 2.5. This X
@@ -436,7 +436,7 @@ window.__tests.zigzagSinglePixelSpanRetractsAcrossGap = function () {
   return { pass, detail: { checks: checks, lines: lines } };
 };
 
-window.__tests.zigzagSameRowSplitSpanRetractsAcrossGap = function () {
+window.__tests.sweepXBothSameRowSplitSpanRetractsAcrossGap = function () {
   const checks = [];
   const width = 6, height = 1;
   const cut = new Uint8Array(width * height);
@@ -446,7 +446,7 @@ window.__tests.zigzagSameRowSplitSpanRetractsAcrossGap = function () {
   const lines = [];
   emitRasterSweepMoves({
     lines, cut, width, height, pixelSizeMm: 1, originMode: "center", rowStep: 1,
-    direction: "zigzag", zAtFn: () => -1, safeZMm: 5, feedMmMin: 1000,
+    direction: "xBoth", zAtFn: () => -1, safeZMm: 5, feedMmMin: 1000,
     plungeMmMin: 300, atSafeZ: true,
   });
 
@@ -455,6 +455,84 @@ window.__tests.zigzagSameRowSplitSpanRetractsAcrossGap = function () {
   const retractBefore = secondSpanRapidIdx > 0 && lines.slice(0, secondSpanRapidIdx).some((l) => l === "G0 Z5.000");
   checks.push(["second same-row span is reached by rapid after retract", secondSpanRapidIdx !== -1 && retractBefore, lines]);
   checks.push(["no G1 XY crosses same-row transparent gap", unsafeFeedIdx === -1, lines]);
+
+  const pass = checks.every(([, ok]) => ok);
+  return { pass, detail: { checks, lines } };
+};
+
+window.__tests.sweepYDirectionsTraverseColumns = function () {
+  const width = 3, height = 4, pixelSizeMm = 1;
+  const cut = new Uint8Array(width * height).fill(1);
+
+  function run(direction) {
+    const lines = [];
+    const visited = [];
+    emitRasterSweepMoves({
+      lines, cut, width, height, pixelSizeMm, originMode: "center", rowStep: 1,
+      direction,
+      zAtFn: (px, py) => -1 - 0.01 * (px * height + py),
+      safeZMm: 5, feedMmMin: 1000, plungeMmMin: 300, atSafeZ: true,
+      afterRow: (positions) => {
+        for (const p of positions) visited.push([p.px, p.py]);
+      },
+    });
+    return { lines, visited };
+  }
+
+  const expectedConventional = [
+    [0, 0], [0, 1], [0, 2], [0, 3],
+    [1, 0], [1, 1], [1, 2], [1, 3],
+    [2, 0], [2, 1], [2, 2], [2, 3],
+  ];
+  const expectedClimb = [
+    [0, 3], [0, 2], [0, 1], [0, 0],
+    [1, 3], [1, 2], [1, 1], [1, 0],
+    [2, 3], [2, 2], [2, 1], [2, 0],
+  ];
+  const expectedBoth = [
+    [0, 0], [0, 1], [0, 2], [0, 3],
+    [1, 3], [1, 2], [1, 1], [1, 0],
+    [2, 0], [2, 1], [2, 2], [2, 3],
+  ];
+
+  const conventional = run("yConventional");
+  const climb = run("yClimb");
+  const both = run("yBoth");
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const hasCutYMove = (result) => result.lines.some((l) => /^G1\b/.test(l) && /\bY-?\d+\.\d+\b/.test(l));
+
+  const checks = [
+    ["yConventional sweeps each column top-to-bottom", same(conventional.visited, expectedConventional), conventional.visited],
+    ["yClimb sweeps each column bottom-to-top", same(climb.visited, expectedClimb), climb.visited],
+    ["yBoth alternates columns and starts conventional", same(both.visited, expectedBoth), both.visited],
+    ["yConventional emits G1 moves with Y words", hasCutYMove(conventional), conventional.lines],
+    ["yClimb emits G1 moves with Y words", hasCutYMove(climb), climb.lines],
+    ["yBoth emits G1 moves with Y words", hasCutYMove(both), both.lines],
+  ];
+
+  const pass = checks.every(([, ok]) => ok);
+  return { pass, detail: { checks, lines: { conventional: conventional.lines, climb: climb.lines, both: both.lines } } };
+};
+
+window.__tests.sweepYBothSplitColumnRetractsAcrossGap = function () {
+  const checks = [];
+  const width = 1, height = 6;
+  const cut = new Uint8Array(width * height);
+  cut[0] = 1; cut[1] = 1;
+  cut[4] = 1; cut[5] = 1;
+
+  const lines = [];
+  emitRasterSweepMoves({
+    lines, cut, width, height, pixelSizeMm: 1, originMode: "center", rowStep: 1,
+    direction: "yBoth", zAtFn: () => -1, safeZMm: 5, feedMmMin: 1000,
+    plungeMmMin: 300, atSafeZ: true,
+  });
+
+  const secondSpanRapidIdx = lines.findIndex((l) => /^G0\b/.test(l) && /\bY-1\.500\b/.test(l));
+  const unsafeFeedIdx = lines.findIndex((l) => /^G1\b/.test(l) && /\bY-1\.500\b/.test(l));
+  const retractBefore = secondSpanRapidIdx > 0 && lines.slice(0, secondSpanRapidIdx).some((l) => l === "G0 Z5.000");
+  checks.push(["second vertical span is reached by rapid after retract", secondSpanRapidIdx !== -1 && retractBefore, lines]);
+  checks.push(["no G1 Y crosses vertical transparent gap", unsafeFeedIdx === -1, lines]);
 
   const pass = checks.every(([, ok]) => ok);
   return { pass, detail: { checks, lines } };
@@ -476,11 +554,11 @@ window.__tests.gcodeGeneratorGoldenOutput = function () {
   for (let y = 0; y < H; y++) for (let x = 0; x < W; x++)
     targetSurface[y * W + x] = cut[y * W + x] === 1 ? -0.5 - 0.05 * x : -Infinity;
   const rtool = { id: "t1", name: "Test Tool!", shape: "flat", diameterMm: 3, radiusMm: 1.5, stepoverMm: 1, maxStepdownMm: 1, feedMmMin: 1234, plungeMmMin: 321, spindleRpm: 12000 };
-  const rpass = { id: "p1", name: "TestPass", toolId: "t1", direction: "ltr", stepoverMm: null, maxStepdownMm: null, allowanceMm: 0, enabled: true };
+  const rpass = { id: "p1", name: "TestPass", toolId: "t1", direction: "xConventional", stepoverMm: null, maxStepdownMm: null, allowanceMm: 0, enabled: true };
   const rjob = { imageName: "myimage.png", widthPx: W, heightPx: H, pixelSizeMm: 1, zeroMode: "stockTop", originMode: "lowerLeft", stockTopMm: 0, safeZMm: 5, passes: [rpass] };
   const remaining = initRemaining(heightMap, rjob.stockTopMm);
   const rasterGcode = generatePassGCode({ pass: rpass, tool: rtool, targetSurface: targetSurface, remaining: remaining, jobSpec: rjob, heightMap: heightMap, passIndex: 1, imageBase: "gold" }).gcode;
-  const EXPECTED_RASTER = "; image: myimage.png\n; dimensions: 6x4 px\n; pixelSizeMm: 1  physical size: 6.000 x 4.000 mm\n; zeroMode: stockTop\n; originMode: lowerLeft\n; stockTopMm: 0\n; safeZMm: 5\n; tool: Test Tool!  shape: flat  diameterMm: 3\n; pass: TestPass  direction: ltr  stepoverMm: 1  stepdownMm: 1  allowanceMm: 0\n; spindleRpm: 12000\n; commanded Z range: -0.75 to -0.50 mm\n; sweeps: 1\nG90\nG21\nG17\nM3 S12000\nG0 Z5.000\nG0 X0.500 Y0.500\nG1 Z-0.500 F321\nG1 X1.500 Z-0.550 F1234\nG1 X2.500 Z-0.600\nG1 X3.500 Z-0.650\nG1 X4.500 Z-0.700\nG1 X5.500 Z-0.750\nG0 Z5.000\nG0 X0.500 Y1.500\nG1 Z-0.500 F321\nG1 X1.500 Z-0.550 F1234\nG1 X2.500 Z-0.600\nG1 X3.500 Z-0.650\nG1 X4.500 Z-0.700\nG1 X5.500 Z-0.750\nG0 Z5.000\nG0 X0.500 Y2.500\nG1 Z-0.500 F321\nG1 X1.500 Z-0.550 F1234\nG1 X2.500 Z-0.600\nG1 X3.500 Z-0.650\nG1 X4.500 Z-0.700\nG0 Z5.000\nG0 X0.500 Y3.500\nG1 Z-0.500 F321\nG1 X1.500 Z-0.550 F1234\nG1 X2.500 Z-0.600\nG1 X3.500 Z-0.650\nG1 X4.500 Z-0.700\nG0 Z5.000\nG0 Z5.000\nM5\nM2\n";
+  const EXPECTED_RASTER = "; image: myimage.png\n; dimensions: 6x4 px\n; pixelSizeMm: 1  physical size: 6.000 x 4.000 mm\n; zeroMode: stockTop\n; originMode: lowerLeft\n; stockTopMm: 0\n; safeZMm: 5\n; tool: Test Tool!  shape: flat  diameterMm: 3\n; pass: TestPass  direction: xConventional  stepoverMm: 1  stepdownMm: 1  allowanceMm: 0\n; spindleRpm: 12000\n; commanded Z range: -0.75 to -0.50 mm\n; sweeps: 1\nG90\nG21\nG17\nM3 S12000\nG0 Z5.000\nG0 X0.500 Y0.500\nG1 Z-0.500 F321\nG1 X1.500 Z-0.550 F1234\nG1 X2.500 Z-0.600\nG1 X3.500 Z-0.650\nG1 X4.500 Z-0.700\nG1 X5.500 Z-0.750\nG0 Z5.000\nG0 X0.500 Y1.500\nG1 Z-0.500 F321\nG1 X1.500 Z-0.550 F1234\nG1 X2.500 Z-0.600\nG1 X3.500 Z-0.650\nG1 X4.500 Z-0.700\nG1 X5.500 Z-0.750\nG0 Z5.000\nG0 X0.500 Y2.500\nG1 Z-0.500 F321\nG1 X1.500 Z-0.550 F1234\nG1 X2.500 Z-0.600\nG1 X3.500 Z-0.650\nG1 X4.500 Z-0.700\nG0 Z5.000\nG0 X0.500 Y3.500\nG1 Z-0.500 F321\nG1 X1.500 Z-0.550 F1234\nG1 X2.500 Z-0.600\nG1 X3.500 Z-0.650\nG1 X4.500 Z-0.700\nG0 Z5.000\nG0 Z5.000\nM5\nM2\n";
   checks.push(["raster pass GCode is byte-identical to golden", rasterGcode === EXPECTED_RASTER, rasterGcode]);
 
   // --- Outline fixture (small central block) ---
@@ -730,7 +808,7 @@ window.__tests.safeSurfacePyramid = function () {
 /**
  * Test 7 (Design.md "Testing" #7): GCode conventions. Builds a small 6x4
  * in-memory fixture (a couple of transparent/non-cut pixels), a flat tool, a
- * single "ltr" pass, and a hand-made targetSurface Float32Array with a
+ * single "xConventional" pass, and a hand-made targetSurface Float32Array with a
  * shallow slope (so "surface following" can be checked exactly and the
  * multi-sweep loop (Phase 7) converges in a single sweep, given
  * maxStepdownMm=1 and a max target depth of 0.75mm below stockTopMm=0), then
@@ -765,7 +843,7 @@ window.__tests.gcodeConventions = function () {
     stepoverMm: 1, maxStepdownMm: 1, feedMmMin: 1234, plungeMmMin: 321, spindleRpm: 12000,
   };
   const pass = {
-    id: "p1", name: "TestPass", toolId: "t1", direction: "ltr",
+    id: "p1", name: "TestPass", toolId: "t1", direction: "xConventional",
     stepoverMm: null, maxStepdownMm: null, allowanceMm: 0, enabled: true,
   };
   const jobSpec = {
@@ -839,7 +917,7 @@ window.__tests.gcodeConventions = function () {
   // Surface following (on the final — here, only — sweep): every effective
   // G1 cutting move's modal Z equals targetSurface at the px/py it
   // corresponds to, within 1e-3. Reconstruct expected Z values by replaying
-  // the same row/span/x traversal generatePassGCode uses (ltr, rowStep=1)
+  // the same row-track/span traversal generatePassGCode uses (xConventional, rowStep=1)
   // and compare against modal-replayed G1 Z values in order. Valid because
   // this fixture converges in exactly one sweep (asserted above).
   const g1ZValues = [];
@@ -881,9 +959,9 @@ window.__tests.gcodeConventions = function () {
 };
 
 /**
- * Regression test: in "zigzag" passes, emitRasterSweepMoves must NOT retract
- * to safe Z between rows — only ltr/rtl retract per-row since they rapid all
- * the way back across the row. Instead zigzag does a minimal transition:
+ * Regression test: in "xBoth" passes, emitRasterSweepMoves must NOT retract
+ * to safe Z between clear adjacent tracks. One-way X sweeps retract per track;
+ * xBoth instead uses a minimal transition:
  * travel XY at feed speed at the higher of {current Z, next-start Z}, then
  * step to the start Z (raise-then-move if the next start is raised above
  * current, else move-then-plunge).
@@ -897,11 +975,11 @@ window.__tests.gcodeConventions = function () {
  * lower (exercises the move-then-plunge branch). Both expected outputs are
  * exact literal transcriptions of real emitRasterSweepMoves output, captured
  * directly from the implementation, so this is also a golden/
- * characterization check. An "ltr" control run of the zRaise fixture
- * confirms the no-mid-sweep-retract behavior is zigzag-specific (ltr still
- * retracts once per row).
+ * characterization check. An "xConventional" control run of the zRaise fixture
+ * confirms the no-mid-sweep-retract behavior is xBoth-specific (xConventional
+ * still retracts once per row).
  */
-window.__tests.zigzagNoSafeRetractBetweenRows = function () {
+window.__tests.sweepXBothNoSafeRetractBetweenRows = function () {
   const checks = [];
 
   const width = 5, height = 3, pixelSizeMm = 1;
@@ -925,7 +1003,7 @@ window.__tests.zigzagNoSafeRetractBetweenRows = function () {
   const isSafeRetract = (l) => l.startsWith("G0") && /(^| )Z5\.000($| )/.test(l);
 
   // --- Golden fixtures: exact captured output from emitRasterSweepMoves. ---
-  const expectedRaiseZigzag = [
+  const expectedRaiseXBoth = [
     "G0 X-2.000 Y-1.000",
     "G1 Z-0.400 F300",
     "G1 X-1.000 Z-0.450 F1000",
@@ -946,7 +1024,7 @@ window.__tests.zigzagNoSafeRetractBetweenRows = function () {
     "G1 X2.000 Z-0.200",
     "G0 Z5.000",
   ];
-  const expectedPlungeZigzag = [
+  const expectedPlungeXBoth = [
     "G0 X-2.000 Y-1.000",
     "G1 Z0.400 F300",
     "G1 X-1.000 Z0.350 F1000",
@@ -968,60 +1046,60 @@ window.__tests.zigzagNoSafeRetractBetweenRows = function () {
     "G0 Z5.000",
   ];
 
-  const raiseZigzag = run(zRaise, "zigzag");
-  const plungeZigzag = run(zPlunge, "zigzag");
-  const raiseLtr = run(zRaise, "ltr");
+  const raiseXBoth = run(zRaise, "xBoth");
+  const plungeXBoth = run(zPlunge, "xBoth");
+  const raiseXConventional = run(zRaise, "xConventional");
 
   const arraysEqual = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
 
   checks.push([
-    "golden: run(zRaise, 'zigzag') matches captured expected output exactly",
-    arraysEqual(raiseZigzag, expectedRaiseZigzag),
-    raiseZigzag,
+    "golden: run(zRaise, 'xBoth') matches captured expected output exactly",
+    arraysEqual(raiseXBoth, expectedRaiseXBoth),
+    raiseXBoth,
   ]);
   checks.push([
-    "golden: run(zPlunge, 'zigzag') matches captured expected output exactly",
-    arraysEqual(plungeZigzag, expectedPlungeZigzag),
-    plungeZigzag,
-  ]);
-
-  // 1. zRaise/zigzag: exactly one safe retract, and it is the last line.
-  const raiseZigzagRetracts = raiseZigzag.filter(isSafeRetract);
-  checks.push([
-    "zigzag (raise fixture): exactly 1 safe-Z retract, and it is the last line",
-    raiseZigzagRetracts.length === 1 && isSafeRetract(raiseZigzag[raiseZigzag.length - 1]),
-    { count: raiseZigzagRetracts.length, lastLine: raiseZigzag[raiseZigzag.length - 1] },
+    "golden: run(zPlunge, 'xBoth') matches captured expected output exactly",
+    arraysEqual(plungeXBoth, expectedPlungeXBoth),
+    plungeXBoth,
   ]);
 
-  // 2. zPlunge/zigzag: exactly one safe retract, and it is the last line.
-  const plungeZigzagRetracts = plungeZigzag.filter(isSafeRetract);
+  // 1. zRaise/xBoth: exactly one safe retract, and it is the last line.
+  const raiseXBothRetracts = raiseXBoth.filter(isSafeRetract);
   checks.push([
-    "zigzag (plunge fixture): exactly 1 safe-Z retract, and it is the last line",
-    plungeZigzagRetracts.length === 1 && isSafeRetract(plungeZigzag[plungeZigzag.length - 1]),
-    { count: plungeZigzagRetracts.length, lastLine: plungeZigzag[plungeZigzag.length - 1] },
+    "xBoth (raise fixture): exactly 1 safe-Z retract, and it is the last line",
+    raiseXBothRetracts.length === 1 && isSafeRetract(raiseXBoth[raiseXBoth.length - 1]),
+    { count: raiseXBothRetracts.length, lastLine: raiseXBoth[raiseXBoth.length - 1] },
   ]);
 
-  // 3. ltr control: exactly 3 safe retracts (one per cut row) -> proves the
-  // no-mid-sweep-retract behavior is zigzag-only.
-  const raiseLtrRetracts = raiseLtr.filter(isSafeRetract);
+  // 2. zPlunge/xBoth: exactly one safe retract, and it is the last line.
+  const plungeXBothRetracts = plungeXBoth.filter(isSafeRetract);
   checks.push([
-    "ltr control (raise fixture): exactly 3 safe-Z retracts (one per cut row)",
-    raiseLtrRetracts.length === 3,
-    { count: raiseLtrRetracts.length },
+    "xBoth (plunge fixture): exactly 1 safe-Z retract, and it is the last line",
+    plungeXBothRetracts.length === 1 && isSafeRetract(plungeXBoth[plungeXBoth.length - 1]),
+    { count: plungeXBothRetracts.length, lastLine: plungeXBoth[plungeXBoth.length - 1] },
+  ]);
+
+  // 3. xConventional control: exactly 3 safe retracts (one per cut row) proves
+  // the no-mid-sweep-retract behavior is xBoth-only.
+  const raiseXConventionalRetracts = raiseXConventional.filter(isSafeRetract);
+  checks.push([
+    "xConventional control (raise fixture): exactly 3 safe-Z retracts",
+    raiseXConventionalRetracts.length === 3,
+    { count: raiseXConventionalRetracts.length },
   ]);
 
   // 4. Raise transitions: G0 Z<non-safe> lines (the "raise first" step)
   // appear exactly twice (once per inter-row transition), and no G1 F300
   // (plunge) line occurs after the first one — raises use G0, never a plunge.
-  const raiseNonSafeG0Z = raiseZigzag.filter(
+  const raiseNonSafeG0Z = raiseXBoth.filter(
     (l) => l.startsWith("G0") && /\bZ(-?\d+\.\d+)\b/.test(l) && !isSafeRetract(l)
   );
-  const firstPlungeIdx = raiseZigzag.findIndex((l) => l.startsWith("G1") && /\bF300\b/.test(l));
-  const laterPlunges = raiseZigzag
+  const firstPlungeIdx = raiseXBoth.findIndex((l) => l.startsWith("G1") && /\bF300\b/.test(l));
+  const laterPlunges = raiseXBoth
     .slice(firstPlungeIdx + 1)
     .filter((l) => l.startsWith("G1") && /\bF300\b/.test(l));
   checks.push([
-    "zigzag (raise fixture): exactly 2 raise-transition G0 Z moves, no plunge (F300) after the initial one",
+    "xBoth (raise fixture): exactly 2 raise-transition G0 Z moves, no plunge (F300) after the initial one",
     raiseNonSafeG0Z.length === 2 && laterPlunges.length === 0,
     { raiseNonSafeG0Z, laterPlunges },
   ]);
@@ -1030,24 +1108,24 @@ window.__tests.zigzagNoSafeRetractBetweenRows = function () {
   // exactly 3 times (1 initial start plunge + 2 inter-row plunges); each
   // inter-row plunge is immediately preceded by a G1 X/Y feed move with no Z word.
   const plungeFeedLines = [];
-  plungeZigzag.forEach((l, i) => {
+  plungeXBoth.forEach((l, i) => {
     if (l.startsWith("G1") && /\bF300\b/.test(l)) plungeFeedLines.push(i);
   });
   const interRowPlungeIdxs = plungeFeedLines.slice(1); // skip the initial start plunge
   const interRowPlungesPrecededByBareG1 = interRowPlungeIdxs.every((i) => {
-    const prev = plungeZigzag[i - 1] || "";
+    const prev = plungeXBoth[i - 1] || "";
     return prev.startsWith("G1") && /\bY/.test(prev) && !/\bZ/.test(prev);
   });
   checks.push([
-    "zigzag (plunge fixture): exactly 3 F300 plunge lines, each inter-row one preceded by a bare G1 X/Y move",
+    "xBoth (plunge fixture): exactly 3 F300 plunge lines, each inter-row one preceded by a bare G1 X/Y move",
     plungeFeedLines.length === 3 && interRowPlungesPrecededByBareG1,
-    { plungeFeedLines: plungeFeedLines.map((i) => plungeZigzag[i]), interRowPlungesPrecededByBareG1 },
+    { plungeFeedLines: plungeFeedLines.map((i) => plungeXBoth[i]), interRowPlungesPrecededByBareG1 },
   ]);
 
   // 6. Surface following intact: the modal Z commanded for each cut pixel
   // matches zRaise at that pixel. Replays the same row/px traversal
-  // emitRasterSweepMoves uses (zigzag alternates row direction, starting
-  // ltr). A row's first pixel is reached by a G1 line: either the initial
+  // emitRasterSweepMoves uses (xBoth alternates row direction, starting
+  // xConventional). A row's first pixel is reached by a G1 line: either the initial
   // row-start plunge, or the inter-row XY feed after any upward G0 Z raise.
   // Every other pixel is set by an ordinary "G1 X.. Z.." cut move, so the
   // checkpoints are the modal Z value at every G1 line.
@@ -1062,7 +1140,7 @@ window.__tests.zigzagNoSafeRetractBetweenRows = function () {
   }
   const raiseCutZs = [];
   let modalZForCuts = null;
-  for (const line of raiseZigzag) {
+  for (const line of raiseXBoth) {
     const zMatch = line.match(/\bZ(-?\d+\.\d+)\b/);
     if (zMatch) modalZForCuts = parseFloat(zMatch[1]);
     if (line.startsWith("G1") && modalZForCuts !== null) {
@@ -1079,7 +1157,7 @@ window.__tests.zigzagNoSafeRetractBetweenRows = function () {
     }
   }
   checks.push([
-    "zigzag (raise fixture): cut-move Z values match zRaise(px, py) at each traversed pixel (<=1e-3)",
+    "xBoth (raise fixture): cut-move Z values match zRaise(px, py) at each traversed pixel (<=1e-3)",
     surfaceFollowingOk,
     { emittedCount: raiseCutZs.length, expectedCount: expectedRaiseCutZs.length, maxZDiff },
   ]);
@@ -1093,7 +1171,7 @@ window.__tests.zigzagNoSafeRetractBetweenRows = function () {
  * value is unchanged from the previous move"), X/Y/Z/F words must only be
  * written when they differ from the previously emitted modal value. Builds a
  * small flat-target fixture (every cut pixel commands the exact same Z) with
- * 2 rows x a 4px span each, `direction: "ltr"`, converging in a single sweep
+ * 2 rows x a 4px span each, `direction: "xConventional"`, converging in a single sweep
  * (shallow target vs. the stepdown budget, same trick as gcodeConventions
  * above). The flat same-Z rows should collapse to one endpoint cut move per
  * row, while still preserving the plunge/cut feed transition.
@@ -1117,7 +1195,7 @@ window.__tests.feedWordOmittedWhenUnchanged = function () {
     stepoverMm: 1, maxStepdownMm: 1, feedMmMin: 1500, plungeMmMin: 400, spindleRpm: 10000,
   };
   const pass = {
-    id: "p1", name: "FeedTestPass", toolId: "t1", direction: "ltr",
+    id: "p1", name: "FeedTestPass", toolId: "t1", direction: "xConventional",
     stepoverMm: null, maxStepdownMm: null, allowanceMm: 0, enabled: true,
   };
   const jobSpec = {
@@ -1216,7 +1294,7 @@ window.__tests.feedWordOmittedWhenUnchanged = function () {
  * appear in any cut move." Builds a small 10x8 heightMap with a block of
  * cut===0 ("transparent") pixels punched out of the interior (not just at the
  * edges, so row spans genuinely have to split around a hole rather than just
- * stopping early), generates one pass's GCode (ltr, single sweep), then
+ * stopping early), generates one pass's GCode (xConventional, single sweep), then
  * inverts pixelCenterToMachineXY to map every effective G1 cutting position
  * back to the nearest source pixel and asserts:
  *   - every CUTTING move (modal `G1` at/below stockTopMm, even if unchanged
@@ -1252,7 +1330,7 @@ window.__tests.maskSkip = function () {
   const safeZMm = 5;
 
   // Flat terrain (well within a single sweep) so this test exercises exactly
-  // the row/span/mask logic, not multi-sweep stepping.
+  // the row-track/span/mask logic, not multi-sweep stepping.
   const targetSurface = new Float32Array(width * height);
   for (let i = 0; i < targetSurface.length; i++) {
     targetSurface[i] = cut[i] === 1 ? -1 : -Infinity;
@@ -1263,7 +1341,7 @@ window.__tests.maskSkip = function () {
     stepoverMm: 1, maxStepdownMm: 5, feedMmMin: 1000, plungeMmMin: 300, spindleRpm: 10000,
   };
   const pass = {
-    id: "p1", name: "MaskSkipPass", toolId: "t1", direction: "ltr",
+    id: "p1", name: "MaskSkipPass", toolId: "t1", direction: "xConventional",
     stepoverMm: null, maxStepdownMm: null, allowanceMm: 0, enabled: true,
   };
   const jobSpec = {
@@ -1419,7 +1497,7 @@ window.__tests.remainingMultiSweep = function () {
     stepoverMm: 1, maxStepdownMm: 3, feedMmMin: 1000, plungeMmMin: 300, spindleRpm: 10000,
   };
   const pass = {
-    id: "p1", name: "RoughAll", toolId: "t1", direction: "ltr",
+    id: "p1", name: "RoughAll", toolId: "t1", direction: "xConventional",
     stepoverMm: null, maxStepdownMm: null, allowanceMm: 0, enabled: true,
   };
   const jobSpec = {
@@ -1461,7 +1539,7 @@ window.__tests.roughingStepdownDoesNotCascadeWithinSweep = function () {
     stepoverMm: 1, maxStepdownMm, feedMmMin: 1000, plungeMmMin: 300, spindleRpm: 10000,
   };
   const pass = {
-    id: "p1", name: "RoughWide", toolId: "t1", direction: "ltr",
+    id: "p1", name: "RoughWide", toolId: "t1", direction: "xConventional",
     stepoverMm: null, maxStepdownMm: null, allowanceMm: 0, enabled: true,
   };
   const jobSpec = {
@@ -1542,11 +1620,11 @@ window.__tests.roughThenFinish = function () {
   };
 
   const roughPass = {
-    id: "p1", name: "Rough", toolId: "t1", direction: "rtl",
+    id: "p1", name: "Rough", toolId: "t1", direction: "xClimb",
     stepoverMm: null, maxStepdownMm: null, allowanceMm: 0.8, enabled: true,
   };
   const finishPass = {
-    id: "p2", name: "Finish", toolId: "t2", direction: "zigzag",
+    id: "p2", name: "Finish", toolId: "t2", direction: "xBoth",
     stepoverMm: null, maxStepdownMm: null, allowanceMm: 0, enabled: true,
   };
 
@@ -1642,7 +1720,7 @@ window.__tests.roughThenFinish = function () {
 /**
  * Regression test for the multi-sweep NON-TERMINATION bug (fixed via fixpoint
  * detection). With stepover > 1px, only pixels ON cutting rows (every
- * `rowStep`) are cut centers driven down to target; between-row pixels are
+ * `rowStep`) are cut centers driven down to target; between-track pixels are
  * only lowered by neighboring cut centers' footprint spillover and PLATEAU at
  * `min(nearby cut-center zc)`, which can permanently stay above their own
  * target[i]. The OLD termination condition ("any cut pixel > target") would
@@ -1660,7 +1738,7 @@ window.__tests.multiSweepConvergesWithStepover = function () {
   const heightMap = { width, height, cut };
 
   // A radial "dome" terrain (machine Z): deepest (-19) at the edges, shallow
-  // (~0) at the center — a smooth non-flat surface so between-row pixels have
+  // (~0) at the center — a smooth non-flat surface so between-track pixels have
   // genuinely different targets from the cut rows. stockTopMm = 0.
   const cx = (width - 1) / 2;
   const cy = (height - 1) / 2;
@@ -1685,7 +1763,7 @@ window.__tests.multiSweepConvergesWithStepover = function () {
     stepoverMm: 3, maxStepdownMm: 3, feedMmMin: 1800, plungeMmMin: 700, spindleRpm: 15000,
   };
   const pass = {
-    id: "p1", name: "Rough", toolId: "t1", direction: "rtl",
+    id: "p1", name: "Rough", toolId: "t1", direction: "xClimb",
     stepoverMm: null, maxStepdownMm: null, allowanceMm: 0.8, enabled: true,
   };
   const jobSpec = {
@@ -1779,7 +1857,7 @@ window.__tests.ballFinishConverges = function () {
     stepoverMm: 0.2, maxStepdownMm: 2, feedMmMin: 1500, plungeMmMin: 700, spindleRpm: 20000,
   };
   const pass = {
-    id: "p1", name: "Finish", toolId: "b1", direction: "zigzag",
+    id: "p1", name: "Finish", toolId: "b1", direction: "xBoth",
     stepoverMm: null, maxStepdownMm: null, allowanceMm: 0, enabled: true,
   };
   const jobSpec = {
@@ -2235,7 +2313,7 @@ window.__tests.singleFileBodyFraming = function () {
     stepoverMm: 1, maxStepdownMm: 1, feedMmMin: 1234, plungeMmMin: 321, spindleRpm: 12000,
   };
   const pass = {
-    id: "p1", name: "BodyTestPass", toolId: "t1", direction: "ltr",
+    id: "p1", name: "BodyTestPass", toolId: "t1", direction: "xConventional",
     stepoverMm: null, maxStepdownMm: null, allowanceMm: 0, enabled: true,
   };
   const jobSpec = {

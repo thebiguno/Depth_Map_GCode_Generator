@@ -28,8 +28,8 @@ creation) happens client-side in plain JavaScript.
 6. **Edit tools and passes**: the app starts with a default flat roughing tool
    + ball finishing tool and a matching two-pass job (rough then finish). Add,
    remove, reorder, or edit any row — every field is editable, including
-   which tool a pass uses, its direction (left-to-right / right-to-left /
-   zigzag / outline), stepover, max stepdown, and allowance (stock left after
+   which tool a pass uses, its direction (Sweep X/Y Conventional, Climb, or
+   Both; or Outline), stepover, max stepdown, and allowance (stock left after
    that raster pass; `0` = finishing depth). Outline passes use outline width
    and outline depth instead of raster allowance.
 7. Fix any validation errors shown under **Generate** (the button is disabled
@@ -85,15 +85,18 @@ quirks), use **Export** — `localStorage` is a convenience, not a guarantee.
   stepdown per sweep — until they reach their target (the safe surface plus
   allowance). Outline passes stamp their emitted groove footprint into the same
   `remaining` array, so later passes see that removed material too.
-- **Raster toolpaths**: rows are cut bottom-to-top (in image space) at the
-  pass's stepover spacing; within each row, contiguous cut-pixel runs
-  ("spans") are cut left-to-right, right-to-left, or alternating (zigzag),
-  evaluating one sample per pixel so Z follows the surface smoothly. Flat
-  same-Z runs are emitted as endpoint moves instead of one redundant `X` line
-  per pixel. Transparent gaps are skipped with a retract + rapid. Zigzag links
-  rows/spans with feed-rate `G1` only when the straight transition stays inside
-  cut pixels; otherwise it retracts to `safeZ`, rapids across the gap, and
-  plunges at the next span.
+- **Raster toolpaths**: X sweeps cut row tracks bottom-to-top; Y sweeps cut
+  column tracks left-to-right. Tracks are spaced by the pass stepover. Within
+  each track, contiguous cut-pixel runs ("spans") are cut in Conventional,
+  Climb, or Both order. X Conventional moves left-to-right, X Climb moves
+  right-to-left, Y Conventional moves top-to-bottom, and Y Climb moves
+  bottom-to-top. Both alternates track direction. Each cut pixel is sampled so
+  Z follows the surface smoothly; flat same-Z runs are emitted as endpoint moves
+  instead of one redundant axis line per pixel. Transparent gaps are skipped
+  with a retract + rapid. Both-direction links between spans/tracks use
+  feed-rate `G1` only when the straight transition stays inside cut pixels;
+  otherwise the tool retracts to `safeZ`, rapids across the gap, and plunges at
+  the next span.
 - **Outline toolpaths**: outline passes generate concentric closed loops outside
   the opaque/cut region, step down to the requested outline depth, retract
   between loops, and stamp each emitted segment into remaining material.
@@ -136,10 +139,10 @@ project's fixed workflow. Explicitly out of scope for this version:
 - **No arc smoothing** — all cutting moves are straight `G1` line segments
   (no `G2`/`G3` fitting or path simplification).
 - **No time estimates** in the GCode headers.
-- **No sampled row-to-row travel-height optimization** — non-zigzag row/span
-  travel retracts to the full `safeZ`, even when a lower travel height would
-  be safe. Clear zigzag links use the higher adjacent cut Z instead of sampling
-  a separate clearance surface; masked gaps still retract to `safeZ`.
+- **No sampled track-to-track travel-height optimization** — one-way raster
+  travel retracts to the full `safeZ`, even when a lower travel height would be
+  safe. Clear Both-direction links use the higher adjacent cut Z instead of
+  sampling a separate clearance surface; masked gaps still retract to `safeZ`.
 - **No metadata sidecar file** reading/writing.
 - A **flat tool larger than a feature simply rides over it** without cutting
   the interior detail — this is the physically correct behavior for that
@@ -159,8 +162,9 @@ detail on the page. You can also open DevTools and run `runTests()` again.
 
 This runs every registered test in `window.__tests` (depth mapping, origin
 transform, validation rules, safe-surface flat/ball dilation against both an
-O(N·r²) reference and a faster O(N·r) decomposition, mask-skip and zigzag gap
-safety, remaining-material stamping and multi-sweep convergence, outline groove
+O(N·r²) reference and a faster O(N·r) decomposition, mask-skip and
+both-direction X/Y gap safety, remaining-material stamping and multi-sweep
+convergence, outline groove
 geometry/stamping, a rough→finish pass sequence, ASCII-only GCode output, and
 GCode format conventions) and logs a pass/fail summary plus per-test detail to
 the console. All tests use small, deterministic, in-code fixtures (including a

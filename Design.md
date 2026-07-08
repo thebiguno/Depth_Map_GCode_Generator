@@ -74,7 +74,7 @@ ToolSpec = {
   shape: "flat" | "ball",
   diameterMm: number,    // > 0
   radiusMm: number,      // = diameterMm / 2 (derive, don't ask user twice)
-  stepoverMm: number,    // > 0, default row spacing
+  stepoverMm: number,    // > 0, default raster track spacing
   maxStepdownMm: number, // > 0, max Z removed per sweep
   feedMmMin: number,     // cutting feed
   plungeMmMin: number,   // plunge feed
@@ -86,7 +86,10 @@ PassSpec = {
   id: string,
   name: string,
   toolId: string,        // references ToolSpec.id
-  direction: "ltr" | "rtl" | "zigzag" | "outline",
+  direction:
+    "xConventional" | "xClimb" | "xBoth" |
+    "yConventional" | "yClimb" | "yBoth" |
+    "outline",
   stepoverMm: number | null,   // null → use tool.stepoverMm
   maxStepdownMm: number | null,// null → use tool.maxStepdownMm
   allowanceMm: number,   // raster stock left above final terrain (>= 0; finish = 0)
@@ -284,44 +287,48 @@ passes so later passes know what's actually left.
 
 For each sweep of a pass:
 
-- **Rows**: iterate `y` from bottom of image upward (largest `py` first, so
-  machine Y goes low→high) stepping by `round(stepoverMm / pixelSizeMm)` pixels
-  (min 1). This is the "row cadence".
-- **Row spans**: within a row, find maximal runs of `cut[i]===1`. Only cut inside
-  spans. Transparent gaps are skipped with a retract + rapid. `zigzag` may
-  feed-link rows/spans only when the straight transition segment stays on
-  `cut===1` pixels.
-- **X order per row by `direction`**:
-  - `ltr`: every row left→right.
-  - `rtl`: every row right→left (climb-only style; after each row retract to
-    `safeZ`, rapid back to the start X, then step to next row).
-  - `zigzag`: alternate direction each row (no rapid-back between rows).
-- **X sampling within a span**: evaluate every pixel center so Z follows the
+- **Tracks**: X sweeps iterate row tracks from bottom of image upward (largest
+  `py` first, so machine Y goes low to high). Y sweeps iterate column tracks
+  from left to right (`px` increasing). Track spacing is
+  `round(stepoverMm / pixelSizeMm)` pixels (min 1).
+- **Track spans**: within a row or column, find maximal runs of `cut[i]===1`.
+  Only cut inside spans. Transparent gaps are skipped with a retract + rapid.
+  `xBoth` and `yBoth` may feed-link spans/tracks only when the straight
+  transition segment stays on `cut===1` pixels.
+- **Sweep order by `direction`**:
+  - `xConventional`: every row left to right.
+  - `xClimb`: every row right to left.
+  - `xBoth`: alternate row direction, starting `xConventional`.
+  - `yConventional`: every column top to bottom in machine Y (`py` low to high).
+  - `yClimb`: every column bottom to top in machine Y (`py` high to low).
+  - `yBoth`: alternate column direction, starting `yConventional`.
+- **Sampling within a span**: evaluate every pixel center so Z follows the
   surface and remaining-material stamping stays pixel-accurate. When a
   consecutive cut run has the same formatted Z and feed, emit only the run's
-  endpoint because the intermediate `X`-only moves are collinear/redundant.
+  endpoint because the intermediate same-axis moves are collinear/redundant.
 
 **Move sequence per span** (emit machine coords via the transform above; Z from
 the multi-sweep `zc`; modal `X/Y/Z/F` words are omitted when unchanged):
 
 ```
-G0 Z<safeZ>                     // ensure clear, if Z is not already safe
-G0 X<x0> Y<y>                   // rapid to span start; omit unchanged words
-G1 Z<zc(x0)> F<plungeMmMin>     // plunge to first cut Z
-G1 X<xEnd> [Z<zc(xEnd)>] F<feedMmMin>
+G0 Z<safeZ>                         // ensure clear, if Z is not already safe
+G0 X<x0> Y<y0>                      // rapid to span start; omit unchanged words
+G1 Z<zc0> F<plungeMmMin>            // plunge to first cut Z
+G1 X<xEnd> Y<yEnd> [Z<zcEnd>] F<feedMmMin>
 ... split into additional G1 endpoints whenever formatted Z changes ...
-G0 Z<safeZ>                     // retract at span end
+G0 Z<safeZ>                         // retract at span end for one-way sweeps
 ```
 
-At row/pass end, retract to `safeZ`. Between spans in the same row, `ltr`/`rtl`
-retract to `safeZ`, rapid to next span start, and plunge again. `zigzag`
-keeps the tool down only for clear in-mask transitions: upward Z-only moves use
-`G0`, XY travel at cutting depth uses `G1`, and downward Z moves use `G1`.
-If the transition crosses any `cut===0` pixel, retract to `safeZ`, rapid to the
-next span start, and plunge again.
+At track/pass end, retract to `safeZ`. Between spans, one-way sweeps retract to
+`safeZ`, rapid to next span start, and plunge again. Both-direction sweeps keep
+the tool down only for clear in-mask transitions: upward Z-only moves use `G0`,
+XY travel at cutting depth uses `G1`, and downward Z moves use `G1`. If the
+transition crosses any `cut===0` pixel, retract to `safeZ`, rapid to the next
+span start, and plunge again.
 
-> Python's "sampled travel height" optimization remains a Non-Goal; zigzag
-> links use the higher adjacent cut Z rather than a sampled clearance surface.
+> Python's "sampled travel height" optimization remains a Non-Goal;
+> Both-direction links use the higher adjacent cut Z rather than a sampled
+> clearance surface.
 
 ## Outline Generation (exact)
 
@@ -392,8 +399,8 @@ Optionally a "depth preview" toggle that maps `terrain` through a colormap.
 **Default seed** (so the app is usable immediately; all editable): one flat tool
 (6.35mm, stepover 3, stepdown 3, feed 1800, plunge 700, 15000rpm) and one ball
 tool (1mm, stepover 0.2, stepdown 2, feed 1500, plunge 700, 20000rpm); two
-passes — a flat roughing pass (`allowance 0.8`, `rtl`) and a ball finishing pass
-(`allowance 0`, `zigzag`). These are starting points, not a fixed workflow.
+passes — a flat roughing pass (`allowance 0.8`, `xClimb`) and a ball finishing
+pass (`allowance 0`, `xBoth`). These are starting points, not a fixed workflow.
 
 ## Validation
 
@@ -411,7 +418,7 @@ Block generation (hard error) on:
 Warn (allow, but surface a message):
 
 - Very large images (e.g. `width*height > 4_000_000`) → memory/time.
-- Pass `stepoverMm > tool.diameterMm` (uncut ridges between rows).
+- Pass `stepoverMm > tool.diameterMm` (uncut ridges between raster tracks).
 - 8-bit fallback used on an image that looks like a terrain map (banding risk).
 
 ## Testing (concrete, browser-callable)
@@ -425,8 +432,8 @@ small synthetic maps with known answers:
 2. **Origin transform**: for a 4×4 map at `pixelSizeMm=1`, center origin maps
    pixel `(0,0)` center to `(-1.5, +1.5)` and `(3,3)` to `(+1.5, -1.5)`;
    lowerLeft maps `(0,3)` to `(0.5, 0.5)`.
-3. **Mask skip / zigzag gap safety**: pixels with `cut===0` never appear in any
-   raster cut move, and zigzag transitions crossing `cut===0` retract/rapid
+3. **Mask skip / both-direction gap safety**: pixels with `cut===0` never appear in any
+   raster cut move, and both-direction transitions crossing `cut===0` retract/rapid
    instead of feeding across the gap at cutting depth.
 4. **Safe surface — flat**: on a 5×5 map that is `0` everywhere except a single
    center pixel at height `10`, a flat tool of radius = 2px produces a flat disk
@@ -481,7 +488,7 @@ Each phase lists **deliverable** and **acceptance** (how to know it's done).
    Accept: tests 4 & 5 pass; worker runs from `file://` in Chrome without error.
 
 6. **Raster generation + GCode + downloads (single pass, no remaining sim).**
-   Deliver: row/span iteration; all three raster directions; move sequence;
+   Deliver: track/span iteration; all six raster directions; move sequence;
    GCode header/preamble/footer/format; per-pass `.nc` Blob download.
    Accept: test 7 passes; a single finishing pass on a fixture produces a
    plausible `.nc` that follows the surface; opens in a GCode viewer.
@@ -506,8 +513,8 @@ Each phase lists **deliverable** and **acceptance** (how to know it's done).
   `STEP3_MAX_CUMULATIVE_CUT` interplay, and per-step feed-by-depth scaling.
 - **Arc/line smoothing** (G2/G3 fitting, Douglas-Peucker simplification).
 - **Time estimates** (trapezoidal-acceleration model) in headers.
-- Sampled row-to-row travel-height optimization (`ltr`/`rtl` rapids stay at
-  `safeZ`; clear zigzag links use adjacent cut Z, not a sampled clearance
+- Sampled track-to-track travel-height optimization (one-way rapids stay at
+  `safeZ`; clear both-direction links use adjacent cut Z, not a sampled clearance
   surface; masked gaps retract to `safeZ`).
 - Metadata sidecar (`.txt`) reading/writing; sea-level/coast-gap semantics.
 - Arbitrary imported vector toolpath strategies beyond the built-in mask outline
