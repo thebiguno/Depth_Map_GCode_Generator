@@ -1,15 +1,15 @@
 # Browser GCode Generator
 
-A standalone, **in-browser** depth-map PNG &rarr; GRBL GCode raster generator.
-It runs directly from `web/index.html` on the `file://` protocol — no server,
+A standalone, **in-browser** depth-map PNG &rarr; GRBL GCode raster/outline generator.
+It runs directly from `index.html` on the `file://` protocol — no server,
 no build step, no external dependencies, and no network access. Everything
 (PNG decoding, safe-surface math, toolpath generation, and `.nc` file
 creation) happens client-side in plain JavaScript.
 
 ## Quick start
 
-1. Open `web/index.html` directly in **Chrome** (double-click it, or drag it
-   into a Chrome window — the URL bar will show `file:///.../web/index.html`).
+1. Open `index.html` directly in **Chrome** (double-click it, or drag it into a
+   Chrome window — the URL bar will show `file:///.../index.html`).
 2. **Load an image**: use the file picker to choose a grayscale (or
    grayscale+alpha) PNG depth map. Black = one extreme of the surface, white =
    the other; alpha (if present) marks pixels to skip (transparent = no
@@ -29,8 +29,9 @@ creation) happens client-side in plain JavaScript.
    + ball finishing tool and a matching two-pass job (rough then finish). Add,
    remove, reorder, or edit any row — every field is editable, including
    which tool a pass uses, its direction (left-to-right / right-to-left /
-   zigzag), stepover, max stepdown, and allowance (stock left after that
-   pass; `0` = finishing depth).
+   zigzag / outline), stepover, max stepdown, and allowance (stock left after
+   that raster pass; `0` = finishing depth). Outline passes use outline width
+   and outline depth instead of raster allowance.
 7. Fix any validation errors shown under **Generate** (the button is disabled
    until the config is valid); warnings are informational and don't block
    generation.
@@ -70,8 +71,9 @@ quirks), use **Export** — `localStorage` is a convenience, not a guarantee.
   shows which path was used ("16-bit precision" or "8-bit (Canvas)").
 - **Depth mapping**: each pixel's normalized gray value (0=black, 1=white) is
   mapped linearly to a machine Z between the entered black/white values.
-  Transparent pixels (alpha=0, if the image has an alpha channel) are treated
-  as "no material" and are never cut.
+  Raster passes only place tool centers on opaque/cut pixels. Outline passes
+  treat the opaque/cut region as the keep-out part boundary and cut a groove
+  outside it.
 - **Tool-safe surface**: for each tool, the depth-mapped surface is dilated by
   the tool's inverted bottom profile (a flat disk, or a ball's spherical dome)
   so the *tool center* never plunges the tool body below the surface anywhere
@@ -79,24 +81,29 @@ quirks), use **Export** — `localStorage` is a convenience, not a guarantee.
   Worker, off the main thread, with progress messages.
 - **Multi-sweep depth stepping + remaining-material tracking**: a single
   `remaining`-material array is shared across all enabled passes, in order.
-  Each pass repeats full-surface sweeps — removing at most the tool's max
-  stepdown per sweep — until it reaches its target (the safe surface plus its
-  allowance), so a later finishing pass sees exactly what an earlier roughing
-  pass left behind rather than the raw surface.
+  Raster passes repeat full-surface sweeps — removing at most the tool's max
+  stepdown per sweep — until they reach their target (the safe surface plus
+  allowance). Outline passes stamp their emitted groove footprint into the same
+  `remaining` array, so later passes see that removed material too.
 - **Raster toolpaths**: rows are cut bottom-to-top (in image space) at the
   pass's stepover spacing; within each row, contiguous cut-pixel runs
   ("spans") are cut left-to-right, right-to-left, or alternating (zigzag),
   evaluating one sample per pixel so Z follows the surface smoothly. Flat
   same-Z runs are emitted as endpoint moves instead of one redundant `X` line
-  per pixel. In left-to-right and right-to-left rasters, transparent gaps are
-  skipped with a retract + rapid; zigzag links rows/spans with feed-rate `G1`
-  moves and uses `G0` only for upward Z-only raises.
+  per pixel. Transparent gaps are skipped with a retract + rapid. Zigzag links
+  rows/spans with feed-rate `G1` only when the straight transition stays inside
+  cut pixels; otherwise it retracts to `safeZ`, rapids across the gap, and
+  plunges at the next span.
+- **Outline toolpaths**: outline passes generate concentric closed loops outside
+  the opaque/cut region, step down to the requested outline depth, retract
+  between loops, and stamp each emitted segment into remaining material.
 - **GCode**: `G90`/`G21`/`G17` + `M3 S<rpm>` preamble, one `.nc` file per
   enabled pass with a descriptive comment header (image, scale, zero/origin,
   tool, pass settings), commanded Z range / sweep summaries, an explicit first
   motion of `G0 Z<safeZ>` before any XY move, and a `G0 Z<safeZ>` / `M5` /
   `M2` footer. Modal `X`, `Y`, `Z`, and `F` words are omitted when unchanged.
-  No `M0` (pause) is ever emitted.
+  GCode text and generated filenames are normalized to printable ASCII. No
+  `M0` (pause) is ever emitted.
 
 ## `file://` caveats and browser support
 
@@ -112,8 +119,9 @@ quirks), use **Export** — `localStorage` is a convenience, not a guarantee.
 - No `fetch`, `XMLHttpRequest`, ES module `import`, service workers, or CDN
   scripts are used anywhere — the app makes no network requests at all, ever.
 - Direct-to-file output uses Chrome's File System Access API. Multi-pass jobs
-  choose an output directory once, then write one `.nc` file per enabled pass.
-  If the API is unavailable, the app falls back to normal download links.
+  either choose an output directory once and write one `.nc` file per enabled
+  pass, or write one combined `.nc` file with `M6` tool changes. If the API is
+  unavailable, the app falls back to normal download links.
 - If you edit `app.js` and don't see changes reflected, do a hard reload
   (Chrome can cache `file://` scripts) rather than assuming something is
   broken.
@@ -123,15 +131,15 @@ quirks), use **Export** — `localStorage` is a convenience, not a guarantee.
 This is a general raster depth-map-to-GCode tool, not a port of any specific
 project's fixed workflow. Explicitly out of scope for this version:
 
-- **Raster toolpaths only** — no contour/outline-groove pass (no polygon
-  offsetting), no vector/outline strategies.
+- **No arbitrary vector strategies** beyond the built-in raster passes and the
+  mask-outline groove pass.
 - **No arc smoothing** — all cutting moves are straight `G1` line segments
   (no `G2`/`G3` fitting or path simplification).
 - **No time estimates** in the GCode headers.
 - **No sampled row-to-row travel-height optimization** — non-zigzag row/span
   travel retracts to the full `safeZ`, even when a lower travel height would
-  be safe. Zigzag links at the higher adjacent cut Z instead of sampling a
-  separate clearance surface.
+  be safe. Clear zigzag links use the higher adjacent cut Z instead of sampling
+  a separate clearance surface; masked gaps still retract to `safeZ`.
 - **No metadata sidecar file** reading/writing.
 - A **flat tool larger than a feature simply rides over it** without cutting
   the interior detail — this is the physically correct behavior for that
@@ -151,9 +159,9 @@ detail on the page. You can also open DevTools and run `runTests()` again.
 
 This runs every registered test in `window.__tests` (depth mapping, origin
 transform, validation rules, safe-surface flat/ball dilation against both an
-O(N·r²) reference and a faster O(N·r) decomposition, the mask-skip guarantee
-that transparent pixels are never cut, remaining-material stamping and
-multi-sweep convergence, a rough→finish pass sequence, and GCode format
-conventions) and logs a pass/fail summary plus per-test detail to the
-console. All tests use small, deterministic, in-code fixtures (including a
+O(N·r²) reference and a faster O(N·r) decomposition, mask-skip and zigzag gap
+safety, remaining-material stamping and multi-sweep convergence, outline groove
+geometry/stamping, a rough→finish pass sequence, ASCII-only GCode output, and
+GCode format conventions) and logs a pass/fail summary plus per-test detail to
+the console. All tests use small, deterministic, in-code fixtures (including a
 9×9 pyramid and a 5×5 single-spike) — no file load is required to run them.

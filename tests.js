@@ -134,8 +134,8 @@ window.__tests.originTransform = function () {
  * Phase 4 validation tests (Design.md "Validation"). Builds small in-memory
  * jobSpec/tools/heightMap fixtures and checks validateJob's hard-error and
  * warning rules. Covers: (a) missing image, (b) tool diameterMm<=0,
- * (c) zAtBlackMm===zAtWhiteMm, (d) valid seed config -> zero errors,
- * (e) stepover > diameter -> warning.
+ * (c) zAtBlackMm===zAtWhiteMm, (d) safeZ<=stockTop, (e) valid seed
+ * config -> zero errors, (f) stepover > diameter -> warning.
  */
 window.__tests.validation = function () {
   const checks = [];
@@ -197,13 +197,20 @@ window.__tests.validation = function () {
     checks.push(["zAtBlack===zAtWhite -> error", errors.some((e) => /zAtBlackMm equals zAtWhiteMm/i.test(e))]);
   }
 
-  // (d) valid seed config with an image -> zero errors.
+  // (d) safeZ <= stockTop -> error.
+  {
+    const jobSpec = makeJobSpec({ safeZMm: 38 });
+    const { errors } = validateJob(jobSpec, makeTools(), makeHeightMap());
+    checks.push(["safeZ<=stockTop -> error", errors.some((e) => /safeZMm .*must be above stockTopMm/i.test(e))]);
+  }
+
+  // (e) valid seed config with an image -> zero errors.
   {
     const { errors } = validateJob(makeJobSpec(), makeTools(), makeHeightMap());
     checks.push(["valid config -> zero errors", errors.length === 0]);
   }
 
-  // (e) stepover > diameter -> warning present.
+  // (f) stepover > diameter -> warning present.
   {
     const jobSpec = makeJobSpec();
     jobSpec.passes[0].stepoverMm = 999;
@@ -267,6 +274,39 @@ window.__tests.formatCoordRejectsNonFinite = function () {
   checks.push(["formatCoord(-0.0004) === '0.000' (neg-zero normalized)", formatCoord(-0.0004) === "0.000"]);
   const pass = checks.every(([, ok]) => ok);
   return { pass, detail: { checks } };
+};
+
+window.__tests.gcodeOutputIsAscii = function () {
+  const checks = [];
+  const width = 2, height = 1;
+  const cut = new Uint8Array(width * height).fill(1);
+  const heightMap = { width, height, gray: new Float32Array(width * height), cut, bits: 8 };
+  const targetSurface = new Float32Array([-1, -1]);
+  const remaining = initRemaining(heightMap, 0);
+  const tool = {
+    id: "t1", name: "tøøl_6mm", shape: "flat",
+    diameterMm: 1, radiusMm: 0.5, stepoverMm: 1, maxStepdownMm: 1,
+    feedMmMin: 1000, plungeMmMin: 300, spindleRpm: 12000,
+  };
+  const pass = {
+    id: "p1", name: "páss→rough", toolId: tool.id, direction: "ltr",
+    stepoverMm: null, maxStepdownMm: null, allowanceMm: 0, enabled: true,
+  };
+  const jobSpec = {
+    imageName: "dépth→map.png", widthPx: width, heightPx: height, pixelSizeMm: 1,
+    zeroMode: "stockTop", originMode: "lowerLeft", stockTopMm: 0, safeZMm: 5,
+    passes: [pass],
+  };
+  const res = generatePassGCode({
+    pass, tool, targetSurface, remaining, jobSpec, heightMap, passIndex: 1,
+    imageBase: "dépth→map",
+  });
+
+  checks.push(["GCode text contains only ASCII", !/[^\x00-\x7F]/.test(res.gcode), res.gcode]);
+  checks.push(["filename contains only ASCII", !/[^\x00-\x7F]/.test(res.filename), res.filename]);
+
+  const pass_ = checks.every(([, ok]) => ok);
+  return { pass: pass_, detail: { checks, filename: res.filename } };
 };
 
 window.__tests.outlineLoopTerminatesOnBadStepdown = function () {
@@ -362,7 +402,7 @@ window.__tests.toolNumberValidation = function () {
   return { pass, detail: { checks } };
 };
 
-window.__tests.zigzagSinglePixelSpanUsesFeed = function () {
+window.__tests.zigzagSinglePixelSpanRetractsAcrossGap = function () {
   const checks = [];
   const width = 6, height = 2;
   const cut = new Uint8Array(width * height);
@@ -371,8 +411,8 @@ window.__tests.zigzagSinglePixelSpanUsesFeed = function () {
   // Top row (py=0, cut second): a single isolated pixel at px=5 (far right).
   cut[0 * width + 5] = 1;
   const lines = [];
-  // py=1 cuts at Z=-2; the lone py=0 pixel is shallower (Z=-1) => a RISING
-  // zig-zag transition, which is the branch that used to rapid-cut it.
+  // py=1 cuts at Z=-2; the lone py=0 pixel is shallower (Z=-1), which would
+  // otherwise tempt zigzag to link across the transparent gap at cutting depth.
   const zAtFn = (px, py) => (py === 1 ? -2 : -1);
   emitRasterSweepMoves({
     lines: lines, cut: cut, width: width, height: height, pixelSizeMm: 1,
@@ -382,15 +422,42 @@ window.__tests.zigzagSinglePixelSpanUsesFeed = function () {
   // Machine X of the isolated pixel px=5: (5 + 0.5 - 6/2) * 1 = 2.5. This X
   // appears nowhere in the bottom row (px 0,1,2 -> X -2.5,-1.5,-0.5).
   const isoX = "X2.500";
-  // The pixel must be reached by a G1 cutting move, not a G0 rapid. (The F word
-  // is legitimately omitted as modal when the feed is unchanged, so assert the
-  // move code rather than requiring an F word.)
-  const cutByFeed = lines.some((l) => l.indexOf("G1") === 0 && l.indexOf(isoX) !== -1);
-  const notRapidReached = !lines.some((l) => l.indexOf("G0") === 0 && l.indexOf(isoX) !== -1);
-  checks.push(["isolated single-pixel span engaged by a G1 cutting move", cutByFeed]);
-  checks.push(["isolated single-pixel span not reached only by a G0 rapid", notRapidReached]);
+  // The straight transition from the bottom span to this isolated pixel crosses
+  // cut===0 pixels, so it must retract to safeZ, rapid to the span start, then
+  // plunge there. The cutting move itself is the modal `G1 Z...` after the rapid.
+  const rapidIdx = lines.findIndex((l) => l.indexOf("G0") === 0 && l.indexOf(isoX) !== -1);
+  const feedIdx = lines.findIndex((l) => l.indexOf("G1") === 0 && l.indexOf(isoX) !== -1);
+  const retractIdx = lines.findIndex((l) => l === "G0 Z5.000");
+  const plungeAfterRapid = rapidIdx !== -1 && lines.slice(rapidIdx + 1).some((l) => /^G1 Z-1\.000\b/.test(l));
+  checks.push(["isolated span reached by G0 after safe retract", rapidIdx !== -1 && retractIdx !== -1 && retractIdx < rapidIdx, lines]);
+  checks.push(["no at-depth G1 XY crosses the masked gap", feedIdx === -1, lines]);
+  checks.push(["isolated span is then plunged with G1", plungeAfterRapid, lines]);
   const pass = checks.every(([, ok]) => ok);
   return { pass, detail: { checks: checks, lines: lines } };
+};
+
+window.__tests.zigzagSameRowSplitSpanRetractsAcrossGap = function () {
+  const checks = [];
+  const width = 6, height = 1;
+  const cut = new Uint8Array(width * height);
+  cut[0] = 1; cut[1] = 1;
+  cut[4] = 1; cut[5] = 1;
+
+  const lines = [];
+  emitRasterSweepMoves({
+    lines, cut, width, height, pixelSizeMm: 1, originMode: "center", rowStep: 1,
+    direction: "zigzag", zAtFn: () => -1, safeZMm: 5, feedMmMin: 1000,
+    plungeMmMin: 300, atSafeZ: true,
+  });
+
+  const secondSpanRapidIdx = lines.findIndex((l) => /^G0\b/.test(l) && /\bX1\.500\b/.test(l));
+  const unsafeFeedIdx = lines.findIndex((l) => /^G1\b/.test(l) && /\bX1\.500\b/.test(l));
+  const retractBefore = secondSpanRapidIdx > 0 && lines.slice(0, secondSpanRapidIdx).some((l) => l === "G0 Z5.000");
+  checks.push(["second same-row span is reached by rapid after retract", secondSpanRapidIdx !== -1 && retractBefore, lines]);
+  checks.push(["no G1 XY crosses same-row transparent gap", unsafeFeedIdx === -1, lines]);
+
+  const pass = checks.every(([, ok]) => ok);
+  return { pass, detail: { checks, lines } };
 };
 
 window.__tests.gcodeGeneratorGoldenOutput = function () {
@@ -1995,6 +2062,56 @@ window.__tests.outlinePassGCode = function () {
     pass: pass_,
     detail: { checks, sweeps: res.sweeps, zMin: res.zMin, zMax: res.zMax, lineCount: lines.length, worstIntrusion },
   };
+};
+
+window.__tests.outlinePassStampsRemaining = function () {
+  const { cut, width, height } = makeDiscFixture(40, 10);
+  const pixelSizeMm = 0.25;
+  const stockTopMm = 0;
+  const checks = [];
+
+  const tool = {
+    id: "t1", name: "outline_tool", shape: "flat",
+    diameterMm: 1, radiusMm: 0.5,
+    stepoverMm: 0.2, maxStepdownMm: 1,
+    feedMmMin: 900, plungeMmMin: 300, spindleRpm: 12000,
+  };
+  const pass = {
+    id: "p1", name: "OutlineGroove", toolId: tool.id, direction: "outline",
+    stepoverMm: null, maxStepdownMm: null, allowanceMm: 0,
+    outlineWidthMm: 1, outlineDepthMm: -2, enabled: true,
+  };
+  const jobSpec = {
+    imageName: "outline_remaining_test.png",
+    pixelSizeMm,
+    zeroMode: "stockTop",
+    originMode: "center",
+    stockTopMm,
+    safeZMm: 5,
+  };
+  const heightMap = { width, height, gray: new Float32Array(width * height), cut, bits: 8 };
+  const remaining = initRemaining(heightMap, stockTopMm);
+
+  generateOutlinePassGCode({
+    pass, tool, cut, width, height, jobSpec, passIndex: 1,
+    imageBase: "outline_remaining_test", remaining,
+  });
+
+  let loweredOutside = 0;
+  let deepestOutside = Infinity;
+  for (let i = 0; i < remaining.length; i++) {
+    if (cut[i] !== 0) continue;
+    if (Number.isFinite(remaining[i]) && remaining[i] < stockTopMm) {
+      loweredOutside++;
+      if (remaining[i] < deepestOutside) deepestOutside = remaining[i];
+    }
+  }
+
+  checks.push(["outline lowered at least one non-raster pixel in remaining", loweredOutside > 0, loweredOutside]);
+  checks.push(["outline remaining reaches requested floor depth somewhere", deepestOutside <= pass.outlineDepthMm + 1e-6, deepestOutside]);
+
+  const pass_ = checks.every(([, ok]) => ok);
+  return { pass: pass_, detail: { checks, loweredOutside, deepestOutside } };
 };
 
 /**

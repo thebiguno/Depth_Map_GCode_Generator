@@ -977,6 +977,31 @@ function baseNameWithoutExtension(filename) {
 }
 
 /**
+ * Normalize emitted GCode text to printable ASCII. User-controlled comments
+ * such as image, pass, and tool names must not leak Unicode into controller
+ * files or byte counts.
+ * @param {*} value
+ * @returns {string}
+ */
+function toGcodeAscii(value) {
+  let s = String(value);
+  if (typeof s.normalize === "function") {
+    s = s.normalize("NFKD");
+  }
+  return s.replace(/[^\x20-\x7E]/g, "_");
+}
+
+/**
+ * Sanitize the user-facing image base before using it in output filenames.
+ * @param {*} name
+ * @returns {string}
+ */
+function sanitizeFileBase(name) {
+  const safe = toGcodeAscii(name).replace(/[^A-Za-z0-9_.-]/g, "_").replace(/^_+|_+$/g, "");
+  return safe || "job";
+}
+
+/**
  * Handle a newly selected file: read as ArrayBuffer, validate + decode,
  * update state, badge, and preview.
  * @param {File} file
@@ -1819,6 +1844,13 @@ function validateJob(jobSpec, tools, heightMap) {
     );
   }
 
+  if (Number.isFinite(jobSpec.safeZMm) && Number.isFinite(jobSpec.stockTopMm) &&
+      jobSpec.safeZMm <= jobSpec.stockTopMm) {
+    errors.push(
+      `safeZMm (${jobSpec.safeZMm}mm) must be above stockTopMm (${jobSpec.stockTopMm}mm) so rapid moves clear the stock.`
+    );
+  }
+
   // --- Warnings ----------------------------------------------------------
   const widthPx = heightMap ? heightMap.width : jobSpec.widthPx;
   const heightPx = heightMap ? heightMap.height : jobSpec.heightPx;
@@ -1875,13 +1907,6 @@ function validateJob(jobSpec, tools, heightMap) {
         warnings.push(`Outline pass "${pass.name}" would allocate a ~${Math.round(paddedPx / 1e6)} megapixel padded buffer; generation may be slow or run out of memory.`);
       }
     }
-  }
-
-  if (Number.isFinite(jobSpec.safeZMm) && Number.isFinite(jobSpec.stockTopMm) &&
-      jobSpec.safeZMm <= jobSpec.stockTopMm) {
-    warnings.push(
-      `safeZMm (${jobSpec.safeZMm}mm) is at or below stockTopMm (${jobSpec.stockTopMm}mm): rapid moves may collide with stock.`
-    );
   }
 
   if (heightMap && heightMap.bits === 8) {
@@ -3002,9 +3027,9 @@ function computeOutlineLoops(cut, width, height, pixelSizeMm, toolRadiusMm, groo
  * (cut===1 region), never into it, using concentric loops from
  * computeOutlineLoops. Self-contained (no DOM) so it can be serialized into
  * the worker via .toString(). Mirrors generatePassGCode's header/preamble/
- * footer + modal-word + streaming conventions exactly, but with loop moves
- * (no raster rows, no remaining-material tracking — outline passes are
- * independent grooves).
+ * footer + modal-word + streaming conventions exactly, but with loop moves.
+ * When a shared `remaining` array is provided, every emitted outline segment
+ * stamps its tool footprint into that array so later passes see the groove.
  *
  * @param {object} params
  * @param {object} params.pass - PassSpec (uses name, outlineWidthMm, outlineDepthMm).
@@ -3015,6 +3040,8 @@ function computeOutlineLoops(cut, width, height, pixelSizeMm, toolRadiusMm, groo
  * @param {object} params.jobSpec - JobSpec (uses imageName, pixelSizeMm, zeroMode, originMode, stockTopMm, safeZMm).
  * @param {string} [params.imageBase]
  * @param {number} params.passIndex - 1-based index among enabled passes.
+ * @param {Float32Array} [params.remaining] - shared remaining-material array,
+ *   mutated in place when present.
  * @param {(chunk:string)=>void} [params.onChunk] - if set, emits GCode chunks and returns `gcode:null`.
  * @param {number} [params.chunkLimitChars]
  * @returns {{filename:string, gcode:string|null, zMin:number, zMax:number, sweeps:number, hitCap:boolean, lineCount:number, byteCount:number}}
@@ -3040,7 +3067,7 @@ function createGcodeStream(onChunk, chunkLimitChars) {
     byteCount: 0,
   };
   gs.emitLine = function (line) {
-    const text = String(line);
+    const text = toGcodeAscii(line);
     gs.lineCount += 1;
     gs.byteCount += text.length + 1; // GCode is ASCII; include trailing newline.
     if (!stream) {
@@ -3101,6 +3128,7 @@ function generateOutlinePassGCode(params) {
   const pixelSizeMm = jobSpec.pixelSizeMm;
   const originMode = jobSpec.originMode;
   const safeZMm = jobSpec.safeZMm;
+  const remaining = params.remaining || null;
 
   const loopsResult = computeOutlineLoops(
     cut, width, height, pixelSizeMm, tool.radiusMm, pass.outlineWidthMm,
@@ -3129,10 +3157,10 @@ function generateOutlinePassGCode(params) {
 
   const sanitizedToolName = sanitizeToolName(tool.name);
   const imageBase = params.imageBase != null
-    ? params.imageBase
+    ? sanitizeFileBase(params.imageBase)
     : ((typeof currentImageBaseName !== "undefined" && currentImageBaseName)
-        ? currentImageBaseName
-        : baseNameWithoutExtension(jobSpec.imageName || "job"));
+        ? sanitizeFileBase(currentImageBaseName)
+        : sanitizeFileBase(baseNameWithoutExtension(jobSpec.imageName || "job")));
   const filename = `${imageBase}_${passIndex}_${sanitizedToolName}.nc`;
 
   const physW = width * pixelSizeMm;
@@ -3189,21 +3217,34 @@ function generateOutlinePassGCode(params) {
       const loop = loops[lo];
       if (loop.length < 2) continue;
 
-      const first = pixelCenterToMachineXY(loop[0].px, loop[0].py, pixelSizeMm, width, height, originMode);
+      const firstRaw = loop[0];
+      const first = pixelCenterToMachineXY(firstRaw.px, firstRaw.py, pixelSizeMm, width, height, originMode);
 
       ensureSafeZ();
       emitMotionLine("G0", { x: first.x, y: first.y });
       emitMotionLine("G1", { z: z, f: tool.plungeMmMin });
+      if (remaining) {
+        stampToolFootprintAt(remaining, width, height, firstRaw.px, firstRaw.py, z, tool.radiusMm, pixelSizeMm, tool.shape);
+      }
       atSafeZ = false;
       if (z < zMin) zMin = z;
       if (z > zMax) zMax = z;
 
+      let prevRaw = firstRaw;
       for (let p = 1; p < loop.length; p++) {
-        const pt = pixelCenterToMachineXY(loop[p].px, loop[p].py, pixelSizeMm, width, height, originMode);
+        const raw = loop[p];
+        const pt = pixelCenterToMachineXY(raw.px, raw.py, pixelSizeMm, width, height, originMode);
         emitMotionLine("G1", { x: pt.x, y: pt.y, f: tool.feedMmMin });
+        if (remaining) {
+          stampToolpathSegment(remaining, width, height, prevRaw.px, prevRaw.py, raw.px, raw.py, z, tool.radiusMm, pixelSizeMm, tool.shape);
+        }
+        prevRaw = raw;
       }
       // Close back to the first vertex.
       emitMotionLine("G1", { x: first.x, y: first.y, f: tool.feedMmMin });
+      if (remaining) {
+        stampToolpathSegment(remaining, width, height, prevRaw.px, prevRaw.py, firstRaw.px, firstRaw.py, z, tool.radiusMm, pixelSizeMm, tool.shape);
+      }
 
       emitMotionLine("G0", { z: safeZMm });
       atSafeZ = true;
@@ -3238,7 +3279,7 @@ function generateOutlinePassGCode(params) {
     `; depth levels: ${levels.length}`,
   ]);
 
-  const allLines = header.concat(preamble, lines, footer);
+  const allLines = header.concat(preamble, lines, footer).map(toGcodeAscii);
   const gcode = allLines.join("\n") + "\n";
 
   return { filename, gcode, zMin, zMax, sweeps: levels.length, hitCap: outlineHitCap, lineCount: allLines.length, byteCount: gcode.length };
@@ -3273,11 +3314,16 @@ function buildWorkerSource() {
     computePassTargetSurface.toString(),
     initRemaining.toString(),
     stampToolFootprint.toString(),
+    stampToolFootprintAt.toString(),
+    stampToolpathSegment.toString(),
     findRowSpans.toString(),
+    cutMaskSegmentIsClear.toString(),
     pixelCenterToMachineXY.toString(),
     formatCoord.toString(),
     formatFeed.toString(),
+    toGcodeAscii.toString(),
     sanitizeToolName.toString(),
+    sanitizeFileBase.toString(),
     baseNameWithoutExtension.toString(),
     createGcodeStream.toString(),
     buildMotionLine.toString(),
@@ -3316,12 +3362,13 @@ self.onmessage = function (e) {
       for (var i = 0; i < m.passes.length; i++) {
         var p = m.passes[i]; // { pass, tool, passIndex }
         if (p.pass.direction === 'outline') {
-          var outFilename = m.imageBase + '_' + p.passIndex + '_' + sanitizeToolName(p.tool.name) + '.nc';
+          var outFilename = sanitizeFileBase(m.imageBase) + '_' + p.passIndex + '_' + sanitizeToolName(p.tool.name) + '.nc';
           self.postMessage({ type: 'progress', reqId: m.reqId, phase: 'toolpath',
             passIndex: p.passIndex, passCount: m.passes.length, passName: p.pass.name });
           self.postMessage({ type: 'gcodeStart', reqId: m.reqId, passIndex: p.passIndex, filename: outFilename });
           var outRes = generateOutlinePassGCode({ pass: p.pass, tool: p.tool, cut: m.cut, width: m.width, height: m.height,
             jobSpec: m.jobSpec, passIndex: p.passIndex, imageBase: m.imageBase,
+            remaining: remaining,
             chunkLimitChars: m.chunkLimitChars,
             onChunk: (function (pp, fn) { return function (chunk) {
               self.postMessage({ type: 'gcodeChunk', reqId: m.reqId, passIndex: pp.passIndex, filename: fn, chunk: chunk });
@@ -3343,7 +3390,7 @@ self.onmessage = function (e) {
         var target = computePassTargetSurface(safe2, p.pass.allowanceMm, m.stockTopMm);
         self.postMessage({ type: 'progress', reqId: m.reqId, phase: 'toolpath',
           passIndex: p.passIndex, passCount: m.passes.length, passName: p.pass.name });
-        var filename = m.imageBase + '_' + p.passIndex + '_' + sanitizeToolName(p.tool.name) + '.nc';
+        var filename = sanitizeFileBase(m.imageBase) + '_' + p.passIndex + '_' + sanitizeToolName(p.tool.name) + '.nc';
         self.postMessage({ type: 'gcodeStart', reqId: m.reqId, passIndex: p.passIndex, filename: filename });
         var res = generatePassGCode({ pass: p.pass, tool: p.tool, targetSurface: target,
           remaining: remaining, jobSpec: m.jobSpec, heightMap: heightMap, passIndex: p.passIndex, imageBase: m.imageBase,
@@ -3361,7 +3408,7 @@ self.onmessage = function (e) {
     } else if (m.cmd === 'generateJob' && m.singleFile) {
       var heightMapC = { width: m.width, height: m.height, cut: m.cut };
       var remainingC = initRemaining(heightMapC, m.stockTopMm);
-      var combinedFilename = m.imageBase + '_combined.nc';
+      var combinedFilename = sanitizeFileBase(m.imageBase) + '_combined.nc';
       var combinedLineCount = 0;
       var combinedByteCount = 0;
       var combinedZMin = Infinity;
@@ -3374,7 +3421,7 @@ self.onmessage = function (e) {
         self.postMessage({ type: 'gcodeChunk', reqId: m.reqId, passIndex: 0, filename: combinedFilename, chunk: chunk });
       }
       function emitCombinedLine(line) {
-        var text = String(line);
+        var text = toGcodeAscii(line);
         combinedLineCount += 1;
         emitCombined(text + '\\n');
       }
@@ -3403,12 +3450,12 @@ self.onmessage = function (e) {
 
         if (ci === 0) {
           emitCombinedLine('G0 Z' + formatCoord(m.jobSpec.safeZMm));
-          emitCombinedLine('M6 T' + cp.toolNumber + ' (tool: ' + cp.tool.name + ' Ø' + cp.tool.diameterMm + 'mm)');
+          emitCombinedLine('M6 T' + cp.toolNumber + ' (tool: ' + cp.tool.name + ' dia ' + cp.tool.diameterMm + 'mm)');
           emitCombinedLine('M3 S' + formatFeed(cp.tool.spindleRpm));
         } else if (cp.pass.toolId !== prevToolId) {
           emitCombinedLine('M5');
           emitCombinedLine('G0 Z' + formatCoord(m.jobSpec.safeZMm));
-          emitCombinedLine('M6 T' + cp.toolNumber + ' (tool change: ' + cp.tool.name + ' Ø' + cp.tool.diameterMm + 'mm)');
+          emitCombinedLine('M6 T' + cp.toolNumber + ' (tool change: ' + cp.tool.name + ' dia ' + cp.tool.diameterMm + 'mm)');
           emitCombinedLine('M3 S' + formatFeed(cp.tool.spindleRpm));
         }
 
@@ -3416,6 +3463,7 @@ self.onmessage = function (e) {
         if (cp.pass.direction === 'outline') {
           cres = generateOutlinePassGCode({ pass: cp.pass, tool: cp.tool, cut: m.cut, width: m.width, height: m.height,
             jobSpec: m.jobSpec, passIndex: cp.passIndex, imageBase: m.imageBase, framing: 'body',
+            remaining: remainingC,
             chunkLimitChars: m.chunkLimitChars,
             onChunk: emitCombined
           });
@@ -3667,9 +3715,8 @@ function runGenerateJobInWorker(params, onProgress, onStream) {
 }
 
 // ============================================================================
-// PHASE 6 — RASTER GENERATION + GCODE OUTPUT + DOWNLOADS (single pass, no
-// remaining-material tracking — that's Phase 7). See Design.md "Raster
-// Generation (exact)", "GCode Output (exact)".
+// RASTER GENERATION + GCODE OUTPUT HELPERS. See Design.md "Raster Generation
+// (exact)", "Remaining-Material Model (exact)", and "GCode Output (exact)".
 //
 // This is deliberately structured so Phase 7 can wrap the row/span/sweep
 // emission in a multi-sweep loop: emitRasterSweepMoves() below takes a
@@ -3718,8 +3765,9 @@ function computePassTargetSurface(safeSurface, allowanceMm, stockTopMm) {
 /**
  * Initialize the `remaining` (current top-of-material) array for a fresh job
  * run, per Design.md "Remaining-Material Model (exact)": `stockTopMm` for
- * every cut pixel (material starts at the stock top everywhere it exists),
- * `+Infinity` ("never cut here") for non-cut pixels.
+ * every cut pixel (material starts at the stock top everywhere raster centers
+ * are allowed), `+Infinity` for non-cut pixels until an outline or tool
+ * footprint actually removes material there.
  * @param {{width:number, height:number, cut:Uint8Array}} heightMap
  * @param {number} stockTopMm
  * @returns {Float32Array} length width*height
@@ -3835,6 +3883,93 @@ function stampToolFootprint(remaining, width, height, px, py, zc, radiusMm, pixe
 }
 
 /**
+ * Stamp a tool footprint whose center may be at a fractional pixel coordinate.
+ * Outline paths are generated from marching-squares geometry, not integer raster
+ * centers, so they need the same remaining-material mutation at arbitrary XY.
+ * @param {Float32Array} remaining
+ * @param {number} width
+ * @param {number} height
+ * @param {number} cx
+ * @param {number} cy
+ * @param {number} zc
+ * @param {number} radiusMm
+ * @param {number} pixelSizeMm
+ * @param {"flat"|"ball"} shape
+ * @returns {boolean}
+ */
+function stampToolFootprintAt(remaining, width, height, cx, cy, zc, radiusMm, pixelSizeMm, shape) {
+  if (!remaining) return false;
+
+  if (!(radiusMm > 0)) {
+    const px = Math.round(cx);
+    const py = Math.round(cy);
+    if (px < 0 || px >= width || py < 0 || py >= height) return false;
+    const idx = py * width + px;
+    if (zc < remaining[idx]) {
+      const changed = remaining[idx] - zc > STAMP_EPS_MM;
+      remaining[idx] = zc;
+      return changed;
+    }
+    return false;
+  }
+
+  let changed = false;
+  const radiusPx = radiusMm / pixelSizeMm;
+  const x0 = Math.max(0, Math.floor(cx - radiusPx));
+  const x1 = Math.min(width - 1, Math.ceil(cx + radiusPx));
+  const y0 = Math.max(0, Math.floor(cy - radiusPx));
+  const y1 = Math.min(height - 1, Math.ceil(cy + radiusPx));
+
+  for (let py = y0; py <= y1; py++) {
+    const rowStart = py * width;
+    for (let px = x0; px <= x1; px++) {
+      const d = Math.hypot(px - cx, py - cy) * pixelSizeMm;
+      if (d > radiusMm) continue;
+      let offset = 0;
+      if (shape === "ball") {
+        offset = radiusMm - Math.sqrt(Math.max(0, radiusMm * radiusMm - d * d));
+      }
+      const idx = rowStart + px;
+      const candidate = zc + offset;
+      if (candidate < remaining[idx]) {
+        if (remaining[idx] - candidate > STAMP_EPS_MM) changed = true;
+        remaining[idx] = candidate;
+      }
+    }
+  }
+
+  return changed;
+}
+
+/**
+ * Stamp a full straight G1 segment into remaining material by sampling no more
+ * than half a pixel apart along the centerline.
+ * @returns {boolean}
+ */
+function stampToolpathSegment(remaining, width, height, x0, y0, x1, y1, zc, radiusMm, pixelSizeMm, shape) {
+  if (!remaining) return false;
+  const steps = Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0) * 2));
+  let changed = false;
+  for (let s = 0; s <= steps; s++) {
+    const t = s / steps;
+    if (stampToolFootprintAt(
+      remaining,
+      width,
+      height,
+      x0 + (x1 - x0) * t,
+      y0 + (y1 - y0) * t,
+      zc,
+      radiusMm,
+      pixelSizeMm,
+      shape
+    )) {
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+/**
  * Format a machine coordinate value to 3 decimal places, per Design.md
  * "GCode Output (exact)" ("Number format": X/Y/Z to 3 decimals).
  * @param {number} v
@@ -3885,6 +4020,33 @@ function findRowSpans(cut, width, py) {
   }
   if (spanStart !== -1) spans.push([spanStart, width - 1]);
   return spans;
+}
+
+/**
+ * Return true when the straight pixel-space segment from one cut center to the
+ * next stays on cut===1 pixels. Used to decide whether a zigzag transition can
+ * remain down at feed, or must retract and rapid over a transparent gap.
+ * @param {Uint8Array} cut
+ * @param {number} width
+ * @param {number} height
+ * @param {number} x0
+ * @param {number} y0
+ * @param {number} x1
+ * @param {number} y1
+ * @returns {boolean}
+ */
+function cutMaskSegmentIsClear(cut, width, height, x0, y0, x1, y1) {
+  const dx = x1 - x0;
+  const dy = y1 - y0;
+  const steps = Math.max(1, Math.ceil(Math.hypot(dx, dy) * 2));
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;
+    const px = Math.round(x0 + dx * t);
+    const py = Math.round(y0 + dy * t);
+    if (px < 0 || px >= width || py < 0 || py >= height) return false;
+    if (cut[py * width + px] !== 1) return false;
+  }
+  return true;
 }
 
 /**
@@ -3945,6 +4107,8 @@ function emitRasterSweepMoves(params) {
 
   const isZigzag = direction === "zigzag";
   let lastCutZnum = null; // numeric Z of the last emitted cut position (for zig-zag transitions)
+  let lastCutPx = null;
+  let lastCutPy = null;
 
   function emitMotionLine(code, words) {
     // Skip no-op lines where every modal word was already at the requested
@@ -4008,7 +4172,11 @@ function emitRasterSweepMoves(params) {
       const { x: x0 } = pixelCenterToMachineXY(x0px, py, pixelSizeMm, width, height, originMode);
       const zc0 = zAtFn(x0px, py);
 
-      if (isZigzag && !atSafeZ && lastCutZnum != null) {
+      const canFeedLink = isZigzag && !atSafeZ && lastCutZnum != null &&
+        lastCutPx != null && lastCutPy != null &&
+        cutMaskSegmentIsClear(cut, width, height, lastCutPx, lastCutPy, x0px, py);
+
+      if (canFeedLink) {
         // Zig-zag inter-segment transition WITHOUT retracting to safe Z:
         // travel XY at the higher of (current Z, next-start Z) so both
         // endpoints clear, then step to the start Z. The XY move may still
@@ -4030,6 +4198,8 @@ function emitRasterSweepMoves(params) {
       }
       atSafeZ = false;
       lastCutZnum = zc0;
+      lastCutPx = x0px;
+      lastCutPy = py;
       if (zc0 < zMin) zMin = zc0;
       if (zc0 > zMax) zMax = zc0;
       if (rowCutPositions) rowCutPositions.push({ px: x0px, py, zc: zc0 });
@@ -4058,6 +4228,8 @@ function emitRasterSweepMoves(params) {
         if (zc < zMin) zMin = zc;
         if (zc > zMax) zMax = zc;
         lastCutZnum = zc;
+        lastCutPx = px;
+        lastCutPy = py;
         if (rowCutPositions) rowCutPositions.push({ px, py, zc });
 
         const sample = { x, zc, zStr: formatCoord(zc) };
@@ -4076,8 +4248,9 @@ function emitRasterSweepMoves(params) {
       }
       flushCutRun();
 
-      // Retract at span end — EXCEPT zig-zag, which keeps the tool down and
-      // handles Z at the next segment's start (see the transition above).
+      // Retract at span end except for zig-zag. Zig-zag decides at the next
+      // segment whether it can feed-link through cut pixels or must retract
+      // before crossing a masked gap.
       if (!isZigzag) {
         emitMotionLine("G0", { z: safeZMm });
         atSafeZ = true;
@@ -4089,9 +4262,9 @@ function emitRasterSweepMoves(params) {
     rowIndex++;
   }
 
-  // Zig-zag leaves the tool down between segments; ensure the sweep ends at
-  // safe Z so the next sweep / pass footer starts clean. (No-op for ltr/rtl,
-  // which already retracted at each span end.)
+  // Zig-zag may leave the tool down between clear in-mask segments; ensure the
+  // sweep ends at safe Z so the next sweep / pass footer starts clean. (No-op
+  // for ltr/rtl, which already retracted at each span end.)
   if (!atSafeZ) {
     emitMotionLine("G0", { z: safeZMm });
     atSafeZ = true;
@@ -4182,10 +4355,10 @@ function generatePassGCode(params) {
 
   const sanitizedToolName = sanitizeToolName(tool.name);
   const imageBase = params.imageBase != null
-    ? params.imageBase
+    ? sanitizeFileBase(params.imageBase)
     : ((typeof currentImageBaseName !== "undefined" && currentImageBaseName)
-        ? currentImageBaseName
-        : baseNameWithoutExtension(jobSpec.imageName || "job"));
+        ? sanitizeFileBase(currentImageBaseName)
+        : sanitizeFileBase(baseNameWithoutExtension(jobSpec.imageName || "job")));
   const filename = `${imageBase}_${passIndex}_${sanitizedToolName}.nc`;
 
   const physW = width * pixelSizeMm;
@@ -4432,7 +4605,7 @@ function generatePassGCode(params) {
     `; sweeps: ${sweeps}`,
   ].map((l) => l); // (comment lines already `; `-prefixed above)
 
-  const allLines = header.concat(preamble, lines, footer);
+  const allLines = header.concat(preamble, lines, footer).map(toGcodeAscii);
   const gcode = allLines.join("\n") + "\n";
 
   return { filename, gcode, zMin, zMax, sweeps, hitCap, lineCount: allLines.length, byteCount: gcode.length };
@@ -4468,7 +4641,7 @@ function supportsDirectFileStreaming(passCount) {
 }
 
 function expectedPassFilename(imageBase, passIndex, toolName) {
-  return `${imageBase}_${passIndex}_${sanitizeToolName(toolName)}.nc`;
+  return `${sanitizeFileBase(imageBase)}_${passIndex}_${sanitizeToolName(toolName)}.nc`;
 }
 
 function formatBytes(bytes) {
@@ -4599,7 +4772,7 @@ async function prepareOutputSinks(workerPasses, imageBase, singleFile) {
     if (wantsDirectStreaming && !canDirectStream) {
       logGenerate("Direct file streaming is not available in this browser/context; falling back to an in-memory download link.");
     }
-    const filename = `${imageBase}_combined.nc`;
+    const filename = `${sanitizeFileBase(imageBase)}_combined.nc`;
     try {
       const sink = canDirectStream
         ? await createFileOutputSink(filename)
@@ -4718,7 +4891,7 @@ async function handleGenerateClick() {
       return { pass, tool, passIndex: i + 1, toolNumber };
     });
 
-    const imageBase = currentImageBaseName || baseNameWithoutExtension(currentJobSpec.imageName || "job");
+    const imageBase = sanitizeFileBase(currentImageBaseName || baseNameWithoutExtension(currentJobSpec.imageName || "job"));
     const preparedOutputs = await prepareOutputSinks(workerPasses, imageBase, singleFile);
     outputSinks = preparedOutputs.sinks;
     logGenerate(preparedOutputs.directToFiles
