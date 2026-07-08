@@ -677,7 +677,12 @@ function extractSamples16(unfiltered, width, height, colorType) {
 
     if (colorType === 4) {
       const alpha16 = (unfiltered[o + 2] << 8) | unfiltered[o + 3];
-      cut[i] = alpha16 > 0 ? 1 : 0;
+      // Require substantial opacity (>= 50%), not merely alpha > 0. An
+      // anti-aliased mask edge has a fringe of near-transparent pixels whose
+      // gray is a blend with the background; treating a 1%-opaque pixel as
+      // solid material cuts it at that bogus (often raised) height, leaving a
+      // lip around the part. 50% coverage is the standard mask contour.
+      cut[i] = alpha16 >= 32768 ? 1 : 0;
     } else {
       cut[i] = 1; // colorType 0: no alpha channel, always opaque
     }
@@ -750,7 +755,10 @@ function decodePng8ViaCanvas(fileBlob, ihdr) {
           // Luminance (Rec. 709 coefficients per spec).
           const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
           gray[i] = lum / 255;
-          cut[i] = a > 0 ? 1 : 0;
+          // Require >= 50% opacity (see extractSamples16): an anti-aliased mask
+          // fringe of near-transparent pixels carries blended gray that would
+          // otherwise be cut as a raised lip around the part.
+          cut[i] = a >= 128 ? 1 : 0;
         }
 
         /** @type {HeightMap} */
